@@ -548,6 +548,8 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
   const [players, setPlayers] = useStateTogether<Record<string, Player>>('players', {});
   const [chatMessages, setChatMessages] = useStateTogether<ChatMessage[]>('chatMessages', []);
   const [usedWords, setUsedWords] = useStateTogether<string[]>('usedWords', []); // Track used words
+  const [originalPrizePool, setOriginalPrizePool] = useStateTogether<number>('originalPrizePool', 0); // Store original prize amount
+  const [roundAdvanceInProgress, setRoundAdvanceInProgress] = useStateTogether<boolean>('roundAdvanceInProgress', false); // Prevent multiple round advances
 
   // Local state
   const [currentColor, setCurrentColor] = useState('#4f46e5');
@@ -646,7 +648,11 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
 
   // Auto-advance round when time runs out OR everyone has guessed correctly
   useEffect(() => {
-    if (gameState.phase === 'playing' && gameState.lobbyOwner === currentPlayerKey && gameState.timeRemaining >= 0) {
+    if (gameState.phase === 'playing' && 
+        gameState.lobbyOwner === currentPlayerKey && 
+        !roundAdvanceInProgress &&
+        gameState.timeRemaining >= 0) {
+      
       const activePlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
       const nonDrawerPlayers = activePlayers.filter((p: Player) => p.id !== gameState.currentDrawer);
       const safeGuessedCorrectly = gameState.guessedCorrectly || [];
@@ -654,34 +660,39 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
         nonDrawerPlayers.every(p => safeGuessedCorrectly.includes(p.id));
       
       console.log('🔍 Round advance check:', {
+        currentRound: gameState.currentRound,
         timeRemaining: gameState.timeRemaining,
         allGuessedCorrectly,
         nonDrawerPlayers: nonDrawerPlayers.length,
         guessedCount: safeGuessedCorrectly.length,
-        nextRoundTriggered: window.nextRoundTriggered
+        roundAdvanceInProgress
       });
       
-      if ((gameState.timeRemaining === 0 || allGuessedCorrectly) && !window.nextRoundTriggered) {
-        console.log('🚀 Triggering next round...');
-        window.nextRoundTriggered = true;
+      if ((gameState.timeRemaining === 0 || allGuessedCorrectly)) {
+        console.log('🚀 Triggering round advance...');
+        setRoundAdvanceInProgress(true);
+        
+        // Delay to show results, then advance
         setTimeout(() => {
           nextRound();
-          // Reset the flag after delay
+          // Reset the flag after advancement
           setTimeout(() => { 
-            window.nextRoundTriggered = false; 
-            console.log('🔄 Reset nextRoundTriggered flag');
-          }, 2000);
-        }, 3000);
+            setRoundAdvanceInProgress(false);
+            console.log('🔄 Reset roundAdvanceInProgress flag');
+          }, 1000);
+        }, allGuessedCorrectly ? 2000 : 3000); // Shorter delay if everyone guessed
       }
     }
   }, [
     gameState.timeRemaining, 
     gameState.phase, 
+    gameState.currentRound,
     gameState.lobbyOwner, 
     gameState.currentDrawer,
-    gameState.guessedCorrectly?.length, // Track changes in guessed correctly count
+    gameState.guessedCorrectly?.length,
+    roundAdvanceInProgress,
     currentPlayerKey, 
-    Object.keys(players).length // Track player count changes
+    Object.keys(players).length
   ]);
 
   // Initialize player when connecting - fix lobby owner logic
@@ -871,14 +882,17 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
               await createTx.wait();
               console.log('✅ Game created in smart contract!');
               
+              // Set original prize pool when creating game
+              setOriginalPrizePool(gameState.wagerAmount * Object.keys(players).length);
+              
               // Fetch updated game info
               gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
               console.log('📋 Updated Game Info:', gameInfo);
               break;
             } else {
               // Wait a bit and retry - lobby owner might be creating the game
-              console.log('⏳ Waiting for lobby owner to create game... (attempt', attempts + 1, ')');
-              await new Promise(resolve => setTimeout(resolve, 2000));
+              console.log('⏳ Smart contract lobby being created by owner... (attempt', attempts + 1, ')');
+              await new Promise(resolve => setTimeout(resolve, 3000)); // Longer wait for contract creation
               attempts++;
               continue;
             }
@@ -898,7 +912,11 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       }
       
       if (!gameInfo || gameInfo.owner === ZERO_ADDRESS) {
-        alert('Game could not be created in smart contract. Please try again or ask the lobby owner to create it first.');
+        if (gameState.lobbyOwner === currentPlayerKey) {
+          alert('Failed to create game in smart contract. Please try again.');
+        } else {
+          alert('Smart contract lobby is being created by the owner. Please wait a moment and try again.');
+        }
         return;
       }
       
@@ -1025,6 +1043,11 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
 
     // Reset used words for new game
     setUsedWords([word]);
+    
+    // Set original prize pool when starting game
+    const totalPrizePool = gameState.wagerAmount * readyPlayers.length;
+    setOriginalPrizePool(totalPrizePool);
+    console.log('💰 Set original prize pool:', totalPrizePool, 'MON');
 
     // Optimistic update
     optimisticGameStateRef.current = {
@@ -1111,7 +1134,15 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
       
       // First, check who the contract owner is
-      const gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+      let gameInfo;
+      try {
+        gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+      } catch (infoError) {
+        console.error('❌ Failed to get game info:', infoError);
+        alert('Failed to retrieve game information from smart contract. The game may not exist or the contract may be inaccessible.');
+        return;
+      }
+      
       const contractOwner = gameInfo.owner;
       const currentWallet = await signer.getAddress();
       
@@ -1119,11 +1150,19 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       console.log('Contract Owner:', contractOwner);
       console.log('Current Wallet:', currentWallet);
       console.log('Lobby Owner (game state):', gameState.lobbyOwner);
+      console.log('Game Info:', gameInfo);
       
       // Check if current wallet is the contract owner
       if (contractOwner.toLowerCase() !== currentWallet.toLowerCase()) {
         console.error('❌ Wallet mismatch: Current wallet is not the game creator in smart contract');
         alert(`❌ Only the game creator can distribute prizes!\n\nGame Creator: ${contractOwner.slice(0, 6)}...${contractOwner.slice(-4)}\nYour Wallet: ${currentWallet.slice(0, 6)}...${currentWallet.slice(-4)}\n\nPlease connect with the wallet that created this game.`);
+        return;
+      }
+      
+      // Check if game is already finished and prize distributed
+      if (gameInfo.isFinished && gameInfo.winner !== ZERO_ADDRESS) {
+        console.log('ℹ️ Prize already distributed to:', gameInfo.winner);
+        setPrizeDistributionTx('already_distributed');
         return;
       }
       
@@ -1141,18 +1180,30 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       
       console.log(`🏆 Distributing prize to winner: ${winner.walletAddress}`);
 
-      // Call smart contract to distribute prize
-      const tx = await gameEscrowContract.distributePrize(gameState.sessionCode, winner.walletAddress);
-      
-      setPrizeDistributionTx(tx.hash);
-      console.log(`💰 Prize distribution transaction: ${tx.hash}`);
-      
-      await tx.wait();
-      console.log('✅ Prize distribution confirmed!');
-      
-      // Get final game info from contract
-      const finalGameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
-      console.log('Final game info:', finalGameInfo);
+      // Estimate gas first to catch errors early
+      try {
+        const gasEstimate = await gameEscrowContract.distributePrize.estimateGas(gameState.sessionCode, winner.walletAddress);
+        console.log('⛽ Gas estimate:', gasEstimate.toString());
+        
+        // Call smart contract to distribute prize
+        const tx = await gameEscrowContract.distributePrize(gameState.sessionCode, winner.walletAddress, {
+          gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+        });
+        
+        setPrizeDistributionTx(tx.hash);
+        console.log(`💰 Prize distribution transaction: ${tx.hash}`);
+        
+        await tx.wait();
+        console.log('✅ Prize distribution confirmed!');
+        
+        // Get final game info from contract
+        const finalGameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+        console.log('Final game info:', finalGameInfo);
+        
+      } catch (gasError: any) {
+        console.error('❌ Gas estimation failed:', gasError);
+        throw new Error(`Gas estimation failed: ${gasError.message}`);
+      }
       
     } catch (error: any) {
       console.error('Prize distribution failed:', error);
@@ -1164,6 +1215,10 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
         alert('❌ Game is not finished yet. Complete all rounds first.');
       } else if (error.message?.includes('Prize already distributed')) {
         alert('ℹ️ Prize has already been distributed for this game.');
+      } else if (error.message?.includes('missing revert data')) {
+        alert(`❌ Transaction failed with missing revert data.\n\nThis usually means:\n• Smart contract is not responding\n• Network connectivity issues\n• Game state mismatch\n\nGame Session: ${gameState.sessionCode}\nContract: ${GAME_ESCROW_ADDRESS}\n\nTry refreshing and reconnecting your wallet.`);
+      } else if (error.message?.includes('Gas estimation failed')) {
+        alert(`❌ Transaction simulation failed: ${error.message}\n\nThe smart contract rejected this transaction. This could mean:\n• Prize already distributed\n• Game not in correct state\n• Insufficient permissions\n\nCheck the console for more details.`);
       } else {
         alert(`Prize distribution failed: ${error.message || 'Unknown error'}\n\nCheck console for details.`);
       }
@@ -1500,10 +1555,12 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       (current.score > prev.score) ? current : prev
     );
 
-    // Use contract info for prize amount if available, fallback to local calculation
-    const actualPrizeAmount = contractGameInfo ? 
-      ethers.formatEther(contractGameInfo.totalDeposits) : 
-      (gameState.wagerAmount * Object.keys(players).length).toFixed(3);
+    // Use original prize pool if available, otherwise calculate from contract or player count
+    const displayPrizeAmount = originalPrizePool > 0 ? 
+      originalPrizePool.toFixed(3) :
+      contractGameInfo ? 
+        ethers.formatEther(contractGameInfo.totalDeposits) : 
+        (gameState.wagerAmount * Object.keys(players).length).toFixed(3);
 
     return (
       <div className="min-h-screen bg-gradient-primary p-4">
@@ -1519,7 +1576,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                   🎉 Winner: {winner.nickname}
                 </h2>
                 <p className="text-2xl text-yellow-700 font-bold mb-4">
-                  Prize: {actualPrizeAmount} MON
+                  Prize: {displayPrizeAmount} MON
                 </p>
                 
                 {/* Smart Contract Info */}
@@ -1529,7 +1586,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                     <div className="grid grid-cols-2 gap-2 text-blue-700">
                       <div>Game Status: {contractGameInfo.isFinished ? '✅ Finished' : '⏳ Active'}</div>
                       <div>Players: {contractGameInfo.playerCount.toString()}</div>
-                      <div>Total Deposits: {ethers.formatEther(contractGameInfo.totalDeposits)} MON</div>
+                      <div>Prize Pool: {displayPrizeAmount} MON {contractGameInfo.totalDeposits.toString() === '0' ? '(Distributed)' : ''}</div>
                       <div>Contract Winner: {contractGameInfo.winner !== ZERO_ADDRESS ? 
                         `${contractGameInfo.winner.slice(0, 6)}...${contractGameInfo.winner.slice(-4)}` : 'None'}</div>
                     </div>
@@ -1546,7 +1603,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                   </div>
                 )}
                 
-                {prizeDistributionTx && (
+                {prizeDistributionTx && prizeDistributionTx !== 'already_distributed' && (
                   <div className="bg-green-100 border-2 border-green-300 rounded-xl p-4 mb-4">
                     <p className="text-green-800 font-medium mb-2">💰 Prize Distribution Successful!</p>
                     <p className="text-sm text-green-700">
@@ -1560,6 +1617,15 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                       >
                         {prizeDistributionTx}
                       </a>
+                    </p>
+                  </div>
+                )}
+                
+                {prizeDistributionTx === 'already_distributed' && (
+                  <div className="bg-green-100 border-2 border-green-300 rounded-xl p-4 mb-4">
+                    <p className="text-green-800 font-medium">✅ Prize was already distributed!</p>
+                    <p className="text-sm text-green-700">
+                      The smart contract has already sent the prize to the winner.
                     </p>
                   </div>
                 )}
