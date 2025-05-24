@@ -1,5 +1,22 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ReactTogether, useStateTogether, useMyId, useAllNicknames, useConnectedUsers } from 'react-together';
+import { ReactTogether, useStateTogether, useMyId, useAllNicknames } from 'react-together';
+import { PrivyProvider, usePrivy } from '@privy-io/react-auth';
+import { ethers } from 'ethers';
+
+// Environment Variables
+const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID;
+const MULTISYNQ_API_KEY = import.meta.env.VITE_MULTISYNQ_API_KEY;
+const MULTISYNQ_APP_ID = import.meta.env.VITE_MULTISYNQ_APP_ID;
+
+// Add console info about wallet injection conflicts
+console.log(
+  '%c🎨 Guess My Drawing',
+  'color: #4f46e5; font-size: 20px; font-weight: bold;'
+);
+console.log(
+  '%cℹ️ Wallet injection conflicts in console are normal when multiple wallet extensions are installed (MetaMask, Backpack, etc.). They do not affect game functionality.',
+  'color: #6b7280; font-size: 12px;'
+);
 
 // Types and Interfaces
 interface Point {
@@ -22,6 +39,7 @@ interface Player {
   score: number;
   hasPaid: boolean;
   isReady: boolean;
+  walletAddress?: string;
 }
 
 interface GameState {
@@ -36,6 +54,7 @@ interface GameState {
   wagerAmount: number;
   lobbyOwner: string;
   guessedCorrectly: string[];
+  sessionCode: string;
 }
 
 interface ChatMessage {
@@ -72,13 +91,7 @@ const MONAD_TESTNET = {
   blockExplorerUrls: ['https://testnet.monadexplorer.com']
 };
 
-// MultiSynq Configuration - Using your existing API key
-const MULTISYNQ_CONFIG = {
-  appId: 'io.multisynq.guessmydrawing',
-  apiKey: '2sEh6UDXdrDn7QUYfQWKSigKShshqcGt3mV3PSSvz2'
-};
-
-// Drawing Canvas Component
+// Enhanced Drawing Canvas Component
 const DrawingCanvas: React.FC<{
   paths: DrawingPath[];
   setPaths: (paths: DrawingPath[]) => void;
@@ -135,7 +148,7 @@ const DrawingCanvas: React.FC<{
     setCurrentPath([]);
   }, [isDrawing, myId, currentPath, color, strokeWidth, paths, setPaths]);
 
-  // Redraw canvas
+  // Redraw canvas with enhanced styling
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -143,13 +156,38 @@ const DrawingCanvas: React.FC<{
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Clear canvas
-    ctx.fillStyle = '#FFFFFF';
+    // Clear canvas with gradient background
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    gradient.addColorStop(0, '#f8fafc');
+    gradient.addColorStop(1, '#e2e8f0');
+    ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Draw all completed paths
+    // Add grid pattern
+    ctx.strokeStyle = '#f1f5f9';
+    ctx.lineWidth = 1;
+    const gridSize = 20;
+    for (let x = 0; x <= canvas.width; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= canvas.height; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(canvas.width, y);
+      ctx.stroke();
+    }
+
+    // Draw all completed paths with shadows
     paths.forEach(path => {
       if (path.points.length < 2) return;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.1)';
+      ctx.shadowBlur = 2;
+      ctx.shadowOffsetX = 1;
+      ctx.shadowOffsetY = 1;
+      
       ctx.beginPath();
       ctx.moveTo(path.points[0].x, path.points[0].y);
       path.points.forEach(point => ctx.lineTo(point.x, point.y));
@@ -158,10 +196,14 @@ const DrawingCanvas: React.FC<{
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.stroke();
+      
+      ctx.shadowColor = 'transparent';
     });
 
     // Draw current path being drawn
     if (currentPath.length > 1) {
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.2)';
+      ctx.shadowBlur = 3;
       ctx.beginPath();
       ctx.moveTo(currentPath[0].x, currentPath[0].y);
       currentPath.forEach(point => ctx.lineTo(point.x, point.y));
@@ -170,25 +212,37 @@ const DrawingCanvas: React.FC<{
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.stroke();
+      ctx.shadowColor = 'transparent';
     }
   }, [paths, currentPath, color, strokeWidth]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={800}
-      height={600}
-      className={`border-2 border-gray-300 bg-white rounded-lg ${canDraw ? 'cursor-crosshair' : 'cursor-not-allowed'}`}
-      onMouseDown={startDrawing}
-      onMouseMove={draw}
-      onMouseUp={stopDrawing}
-      onMouseLeave={stopDrawing}
-      style={{ maxWidth: '100%', height: 'auto' }}
-    />
+    <div className="relative">
+      <canvas
+        ref={canvasRef}
+        width={800}
+        height={600}
+        className={`border-4 border-indigo-200 bg-white rounded-3xl shadow-2xl transition-all duration-300 card-hover ${
+          canDraw ? 'cursor-crosshair border-indigo-400 pulse-glow' : 'cursor-not-allowed border-gray-300'
+        }`}
+        onMouseDown={startDrawing}
+        onMouseMove={draw}
+        onMouseUp={stopDrawing}
+        onMouseLeave={stopDrawing}
+        style={{ maxWidth: '100%', height: 'auto' }}
+      />
+      {!canDraw && (
+        <div className="absolute inset-0 bg-gray-900 bg-opacity-20 rounded-3xl flex items-center justify-center backdrop-blur-sm">
+          <div className="bg-white px-6 py-3 rounded-full shadow-xl border border-gray-200">
+            <span className="text-gray-600 font-medium">🎨 Watch others draw!</span>
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
 
-// Game Chat Component
+// Enhanced Game Chat Component
 const GameChat: React.FC<{
   messages: ChatMessage[];
   onSendMessage: (message: string) => void;
@@ -212,44 +266,48 @@ const GameChat: React.FC<{
   };
 
   return (
-    <div className="bg-white border-2 border-gray-300 rounded-lg p-4 h-96 flex flex-col">
-      <h3 className="text-lg font-bold mb-3 text-gray-800">Game Chat</h3>
-      <div className="flex-1 overflow-y-auto mb-3 space-y-2">
+    <div className="bg-white border-2 border-indigo-200 rounded-3xl p-6 h-96 flex flex-col shadow-2xl card-hover backdrop-blur-sm bg-opacity-95">
+      <h3 className="text-xl font-bold mb-4 text-indigo-800 flex items-center">
+        💬 Game Chat
+      </h3>
+      <div className="flex-1 overflow-y-auto mb-4 space-y-3 pr-2">
         {messages.map((msg) => (
           <div
             key={msg.id}
-            className={`p-2 rounded text-sm ${
+            className={`p-3 rounded-xl text-sm transition-all duration-300 transform hover:scale-105 ${
               msg.isGuess
                 ? msg.isCorrect
-                  ? 'bg-green-100 text-green-800'
-                  : 'bg-yellow-100 text-yellow-800'
-                : 'bg-gray-100 text-gray-800'
+                  ? 'bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 border-l-4 border-green-500 shadow-lg animate-bounce-once'
+                  : 'bg-gradient-to-r from-amber-100 to-yellow-100 text-amber-800 border-l-4 border-amber-500'
+                : 'bg-gradient-to-r from-slate-100 to-gray-100 text-slate-800'
             }`}
           >
-            <span className="font-semibold">{msg.userId.slice(0, 8)}:</span> {msg.message}
+            <span className="font-bold text-indigo-600">{msg.userId.slice(0, 8)}:</span>{' '}
+            <span className={msg.isCorrect ? 'font-bold' : ''}>{msg.message}</span>
+            {msg.isCorrect && <span className="ml-2">🎉</span>}
           </div>
         ))}
         <div ref={messagesEndRef} />
       </div>
-      <form onSubmit={handleSubmit} className="flex gap-2">
+      <form onSubmit={handleSubmit} className="flex gap-3">
         <input
           type="text"
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           placeholder={
             isDrawer
-              ? "You're drawing! Others will guess."
+              ? "🎨 You're drawing! Others will guess."
               : gamePhase === 'playing'
-              ? 'Type your guess...'
-              : 'Game not active'
+              ? '💭 Type your guess...'
+              : '⏳ Game not active'
           }
           disabled={isDrawer || gamePhase !== 'playing'}
-          className="flex-1 px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
+          className="flex-1 px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:bg-gray-100 transition-all duration-200 shadow-inner"
         />
         <button
           type="submit"
           disabled={isDrawer || gamePhase !== 'playing' || !inputValue.trim()}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-300"
+          className="px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl hover:from-indigo-600 hover:to-purple-700 disabled:from-gray-300 disabled:to-gray-400 font-medium transition-all duration-200 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
         >
           Send
         </button>
@@ -258,32 +316,58 @@ const GameChat: React.FC<{
   );
 };
 
-// Player List Component
-const PlayerList: React.FC<{ players: Player[]; gameState: GameState }> = ({ players, gameState }) => {
+// Enhanced Player List Component
+const PlayerList: React.FC<{ players: Player[]; gameState: GameState; onLeaveLobby?: () => void }> = ({ 
+  players, 
+  gameState, 
+  onLeaveLobby 
+}) => {
   return (
-    <div className="bg-white border-2 border-gray-300 rounded-lg p-4">
-      <h3 className="text-lg font-bold mb-3 text-gray-800">Players ({players.length}/9)</h3>
-      <div className="space-y-2">
+    <div className="bg-white border-2 border-indigo-200 rounded-3xl p-6 shadow-2xl card-hover backdrop-blur-sm bg-opacity-95">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-xl font-bold text-indigo-800 flex items-center">
+          👥 Players ({players.length}/9)
+        </h3>
+        {onLeaveLobby && (
+          <button
+            onClick={onLeaveLobby}
+            className="px-3 py-1 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 shadow-md btn-glow"
+          >
+            Leave
+          </button>
+        )}
+      </div>
+      <div className="space-y-3">
         {players.map((player) => (
           <div
             key={player.id}
-            className={`flex justify-between items-center p-2 rounded ${
+            className={`flex justify-between items-center p-4 rounded-xl transition-all duration-300 card-hover ${
               gameState.currentDrawer === player.id
-                ? 'bg-blue-100 border-2 border-blue-500'
-                : 'bg-gray-50'
+                ? 'bg-gradient-to-r from-indigo-100 via-purple-100 to-indigo-100 border-2 border-indigo-500 shadow-xl transform scale-105 pulse-glow'
+                : 'bg-gradient-to-r from-slate-50 to-gray-50 border border-slate-200 hover:from-slate-100 hover:to-gray-100'
             }`}
           >
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
               <div
-                className={`w-3 h-3 rounded-full ${
-                  player.hasPaid ? 'bg-green-500' : 'bg-red-500'
+                className={`w-4 h-4 rounded-full transition-all duration-200 ${
+                  player.hasPaid ? 'bg-gradient-to-r from-green-400 to-green-600 shadow-lg pulse-glow' : 'bg-gradient-to-r from-red-400 to-red-500'
                 }`}
               />
-              <span className="font-medium text-sm">
-                {player.nickname} {gameState.lobbyOwner === player.id && '👑'}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-slate-800 text-sm">
+                  {player.nickname}
+                </span>
+                {gameState.lobbyOwner === player.id && (
+                  <span className="text-xl animate-bounce-once" title="Lobby Owner">👑</span>
+                )}
+                {gameState.currentDrawer === player.id && (
+                  <span className="text-lg animate-pulse" title="Currently Drawing">🎨</span>
+                )}
+              </div>
             </div>
-            <span className="text-sm font-bold text-blue-600">{player.score}pts</span>
+            <span className="text-sm font-black text-indigo-600 bg-gradient-to-r from-indigo-100 to-purple-100 px-3 py-1 rounded-full shadow-inner">
+              {player.score}pts
+            </span>
           </div>
         ))}
       </div>
@@ -292,9 +376,10 @@ const PlayerList: React.FC<{ players: Player[]; gameState: GameState }> = ({ pla
 };
 
 // Main Game Component
-const GuessMyDrawingGame: React.FC = () => {
+const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) => {
   const myId = useMyId();
   const allNicknames = useAllNicknames();
+  const { user, authenticated, ready, login, logout } = usePrivy();
 
   // Game state
   const [gameState, setGameState] = useStateTogether<GameState>('gameState', {
@@ -308,17 +393,17 @@ const GuessMyDrawingGame: React.FC = () => {
     scores: {},
     wagerAmount: 0.01,
     lobbyOwner: '',
-    guessedCorrectly: []
+    guessedCorrectly: [],
+    sessionCode: sessionCode
   });
 
   const [drawingPaths, setDrawingPaths] = useStateTogether<DrawingPath[]>('drawingPaths', []);
   const [players, setPlayers] = useStateTogether<Record<string, Player>>('players', {});
   const [chatMessages, setChatMessages] = useStateTogether<ChatMessage[]>('chatMessages', []);
-  const [walletConnected, setWalletConnected] = useState(false);
 
   // Local state
-  const [currentColor, setCurrentColor] = useState('#000000');
-  const [strokeWidth, setStrokeWidth] = useState(3);
+  const [currentColor, setCurrentColor] = useState('#4f46e5');
+  const [strokeWidth, setStrokeWidth] = useState(4);
 
   // Timer effect
   useEffect(() => {
@@ -334,22 +419,31 @@ const GuessMyDrawingGame: React.FC = () => {
     return () => clearInterval(interval);
   }, [gameState.phase, gameState.timeRemaining, setGameState]);
 
-  // Auto-advance round when time runs out
+  // Auto-advance round when time runs out OR everyone has guessed correctly
   useEffect(() => {
-    if (gameState.phase === 'playing' && gameState.timeRemaining === 0 && gameState.lobbyOwner === myId) {
-      setTimeout(() => nextRound(), 2000);
+    if (gameState.phase === 'playing' && gameState.lobbyOwner === myId) {
+      const activePlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
+      const nonDrawerPlayers = activePlayers.filter((p: Player) => p.id !== gameState.currentDrawer);
+      const allGuessedCorrectly = nonDrawerPlayers.length > 0 && 
+        nonDrawerPlayers.every(p => gameState.guessedCorrectly.includes(p.id));
+      
+      if (gameState.timeRemaining === 0 || allGuessedCorrectly) {
+        setTimeout(() => nextRound(), 3000);
+      }
     }
-  }, [gameState.timeRemaining, gameState.phase, gameState.lobbyOwner, myId]);
+  }, [gameState.timeRemaining, gameState.phase, gameState.lobbyOwner, gameState.guessedCorrectly, gameState.currentDrawer, myId, players]);
 
   // Initialize player when connecting
   useEffect(() => {
-    if (myId && !players[myId]) {
+    if (myId && authenticated && user && !players[myId]) {
+      const walletAddress = user.wallet?.address || '';
       const newPlayer: Player = {
         id: myId,
         nickname: allNicknames[myId] || `Player ${myId.slice(0, 6)}`,
         score: 0,
         hasPaid: false,
-        isReady: false
+        isReady: false,
+        walletAddress
       };
       setPlayers(prev => ({ ...prev, [myId]: newPlayer }));
 
@@ -357,23 +451,9 @@ const GuessMyDrawingGame: React.FC = () => {
         setGameState(prev => ({ ...prev, lobbyOwner: myId }));
       }
     }
-  }, [myId, players, allNicknames, setPlayers, gameState.lobbyOwner, setGameState]);
+  }, [myId, players, allNicknames, setPlayers, gameState.lobbyOwner, setGameState, authenticated, user]);
 
   // Blockchain functions
-  const connectWallet = async () => {
-    if (!window.ethereum) {
-      alert('Please install MetaMask!');
-      return;
-    }
-
-    try {
-      await window.ethereum.request({ method: 'eth_requestAccounts' });
-      setWalletConnected(true);
-    } catch (error) {
-      console.error('Failed to connect wallet:', error);
-    }
-  };
-
   const switchToMonadTestnet = async () => {
     if (!window.ethereum) return;
 
@@ -393,22 +473,21 @@ const GuessMyDrawingGame: React.FC = () => {
   };
 
   const payWager = async () => {
-    if (!window.ethereum || !myId) return;
+    if (!user?.wallet?.address || !myId) return;
 
     try {
       await switchToMonadTestnet();
       
-      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
-      const wagerWei = Math.floor(gameState.wagerAmount * 1e18).toString(16);
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      const wagerWei = ethers.parseEther(gameState.wagerAmount.toString());
 
-      await window.ethereum.request({
-        method: 'eth_sendTransaction',
-        params: [{
-          from: accounts[0],
-          to: '0x0000000000000000000000000000000000000000',
-          value: `0x${wagerWei}`,
-        }],
+      const tx = await signer.sendTransaction({
+        to: '0x0000000000000000000000000000000000000000',
+        value: wagerWei,
       });
+
+      await tx.wait();
 
       setPlayers(prev => ({
         ...prev,
@@ -526,28 +605,92 @@ const GuessMyDrawingGame: React.FC = () => {
     }
   };
 
+  const leaveLobby = () => {
+    if (confirm('Are you sure you want to leave the lobby?')) {
+      window.location.reload();
+    }
+  };
+
   const currentPlayer = players[myId || ''];
   const isDrawer = gameState.currentDrawer === myId;
   const canDraw = isDrawer && gameState.phase === 'playing';
 
+  // Authentication check
+  if (!ready) {
+    return (
+      <div className="min-h-screen bg-gradient-primary flex items-center justify-center">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+          <p className="text-center mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authenticated) {
+    return (
+      <div className="min-h-screen bg-gradient-primary flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full text-center card-hover">
+          <div className="text-6xl mb-6 animate-bounce-once">🎨</div>
+          <h1 className="text-4xl font-bold text-gray-800 mb-6 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+            Guess My Drawing
+          </h1>
+          <p className="text-gray-600 mb-8">
+            A multiplayer drawing & guessing game with blockchain wagering on Monad Testnet
+          </p>
+          <button
+            onClick={login}
+            className="w-full py-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-2xl font-bold text-lg hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
+          >
+            🚀 Connect Wallet & Play
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // Render different phases
   if (gameState.phase === 'lobby') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-400 to-blue-600 p-4">
-        <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-xl p-6">
-          <h1 className="text-4xl font-bold text-center mb-8 text-gray-800">
-            🎨 Guess My Drawing
-          </h1>
+      <div className="min-h-screen bg-gradient-primary p-4">
+        <div className="max-w-6xl mx-auto">
+          {/* Header */}
+          <div className="bg-white rounded-3xl shadow-2xl p-6 mb-6 card-hover backdrop-blur-sm bg-opacity-95">
+            <div className="flex justify-between items-center">
+              <div>
+                <h1 className="text-4xl font-bold text-gray-800 flex items-center gap-3">
+                  🎨 <span className="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Guess My Drawing</span>
+                </h1>
+                <p className="text-gray-600 mt-2">Session: <span className="font-mono font-bold text-indigo-600 bg-indigo-100 px-2 py-1 rounded">{gameState.sessionCode}</span></p>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="text-right">
+                  <p className="text-sm text-gray-600">Connected as</p>
+                  <p className="font-bold text-indigo-600">{user?.wallet?.address?.slice(0, 6)}...{user?.wallet?.address?.slice(-4)}</p>
+                </div>
+                <button
+                  onClick={logout}
+                  className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 btn-glow"
+                >
+                  Logout
+                </button>
+              </div>
+            </div>
+          </div>
           
-          <div className="grid md:grid-cols-2 gap-8">
+          <div className="grid lg:grid-cols-2 gap-8">
             <div className="space-y-6">
-              <div className="bg-gray-50 p-6 rounded-lg">
-                <h3 className="text-xl font-bold mb-4">Game Setup</h3>
+              <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover backdrop-blur-sm bg-opacity-95">
+                <h3 className="text-2xl font-bold mb-6 text-indigo-800 flex items-center gap-2">
+                  ⚙️ Game Setup
+                </h3>
                 
                 {gameState.lobbyOwner === myId && (
-                  <div className="space-y-4">
+                  <div className="space-y-4 mb-6">
                     <div>
-                      <label className="block text-sm font-medium mb-2">Wager Amount (MON)</label>
+                      <label className="block text-sm font-bold text-gray-700 mb-2">
+                        💰 Wager Amount (MON)
+                      </label>
                       <input
                         type="number"
                         step="0.01"
@@ -557,40 +700,37 @@ const GuessMyDrawingGame: React.FC = () => {
                           ...prev,
                           wagerAmount: parseFloat(e.target.value) || 0.01
                         }))}
-                        className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-bold shadow-inner"
                       />
                     </div>
                   </div>
                 )}
 
-                <div className="mt-4 p-4 bg-blue-50 rounded">
-                  <p className="text-sm text-blue-800">
-                    <strong>Wager:</strong> {gameState.wagerAmount} MON per player
-                  </p>
-                  <p className="text-sm text-blue-800">
-                    <strong>Prize Pool:</strong> {(gameState.wagerAmount * Object.keys(players).length).toFixed(3)} MON
-                  </p>
+                <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-6 rounded-2xl border-2 border-indigo-200 shadow-inner">
+                  <div className="grid grid-cols-2 gap-4 text-center">
+                    <div>
+                      <p className="text-sm text-indigo-600 font-medium">Wager per Player</p>
+                      <p className="text-2xl font-bold text-indigo-800">{gameState.wagerAmount} MON</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-purple-600 font-medium">Total Prize Pool</p>
+                      <p className="text-2xl font-bold text-purple-800">{(gameState.wagerAmount * Object.keys(players).length).toFixed(3)} MON</p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                {!walletConnected ? (
-                  <button
-                    onClick={connectWallet}
-                    className="w-full py-3 bg-yellow-500 text-white rounded-lg font-semibold hover:bg-yellow-600"
-                  >
-                    Connect Wallet
-                  </button>
-                ) : !currentPlayer?.hasPaid ? (
+              <div className="bg-white rounded-3xl shadow-2xl p-8 space-y-4 card-hover backdrop-blur-sm bg-opacity-95">
+                {!currentPlayer?.hasPaid ? (
                   <button
                     onClick={payWager}
-                    className="w-full py-3 bg-green-500 text-white rounded-lg font-semibold hover:bg-green-600"
+                    className="w-full py-4 bg-gradient-success text-white rounded-2xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
                   >
-                    Pay Wager ({gameState.wagerAmount} MON)
+                    💳 Pay Wager ({gameState.wagerAmount} MON)
                   </button>
                 ) : (
-                  <div className="text-center text-green-600 font-semibold">
-                    ✅ Ready to Play!
+                  <div className="text-center py-4 bg-gradient-to-r from-green-100 to-emerald-100 rounded-2xl border-2 border-green-300 shadow-inner">
+                    <span className="text-green-700 font-bold text-lg">✅ Ready to Play!</span>
                   </div>
                 )}
 
@@ -598,15 +738,15 @@ const GuessMyDrawingGame: React.FC = () => {
                   <button
                     onClick={startGame}
                     disabled={Object.values(players).filter((p: Player) => p.hasPaid).length < 2}
-                    className="w-full py-3 bg-blue-500 text-white rounded-lg font-semibold hover:bg-blue-600 disabled:bg-gray-300"
+                    className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 transition-all duration-300 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
                   >
-                    Start Game
+                    🚀 Start Game
                   </button>
                 )}
               </div>
             </div>
 
-            <PlayerList players={Object.values(players)} gameState={gameState} />
+            <PlayerList players={Object.values(players)} gameState={gameState} onLeaveLobby={leaveLobby} />
           </div>
         </div>
       </div>
@@ -619,30 +759,32 @@ const GuessMyDrawingGame: React.FC = () => {
     );
 
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-400 to-blue-600 p-4">
-        <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-xl p-6">
-          <h1 className="text-4xl font-bold text-center mb-8 text-gray-800">
-            🏆 Game Finished!
-          </h1>
-          
-          <div className="text-center space-y-6">
-            <div className="bg-yellow-50 border-2 border-yellow-300 rounded-lg p-6">
-              <h2 className="text-3xl font-bold text-yellow-800 mb-2">
-                🎉 Winner: {winner.nickname}
-              </h2>
-              <p className="text-xl text-yellow-700">
-                Prize: {(gameState.wagerAmount * Object.keys(players).length).toFixed(3)} MON
-              </p>
+      <div className="min-h-screen bg-gradient-primary p-4">
+        <div className="max-w-4xl mx-auto">
+          <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover">
+            <h1 className="text-5xl font-bold text-center mb-8 text-gray-800">
+              🏆 Game Finished!
+            </h1>
+            
+            <div className="text-center space-y-8">
+              <div className="bg-gradient-to-r from-yellow-100 to-orange-100 border-4 border-yellow-400 rounded-3xl p-8 card-hover animate-bounce-once">
+                <h2 className="text-4xl font-bold text-yellow-800 mb-4 flex items-center justify-center gap-3">
+                  🎉 Winner: {winner.nickname}
+                </h2>
+                <p className="text-2xl text-yellow-700 font-bold">
+                  Prize: {(gameState.wagerAmount * Object.keys(players).length).toFixed(3)} MON
+                </p>
+              </div>
+
+              <PlayerList players={Object.values(players)} gameState={gameState} />
+
+              <button
+                onClick={() => window.location.reload()}
+                className="py-4 px-8 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
+              >
+                🔄 Play Again
+              </button>
             </div>
-
-            <PlayerList players={Object.values(players)} gameState={gameState} />
-
-            <button
-              onClick={() => window.location.reload()}
-              className="py-3 px-6 bg-blue-500 text-white rounded-lg font-semibold hover:bg-blue-600"
-            >
-              Play Again
-            </button>
           </div>
         </div>
       </div>
@@ -651,66 +793,92 @@ const GuessMyDrawingGame: React.FC = () => {
 
   // Playing phase
   return (
-    <div className="min-h-screen bg-gray-100 p-4">
+    <div className="min-h-screen bg-gradient-to-br from-slate-100 to-slate-200 p-4">
       <div className="max-w-7xl mx-auto">
-        <div className="bg-white rounded-lg shadow p-4 mb-4">
+        {/* Game Header */}
+        <div className="bg-white rounded-3xl shadow-2xl p-6 mb-6 card-hover backdrop-blur-sm bg-opacity-95">
           <div className="flex justify-between items-center">
-            <h1 className="text-2xl font-bold text-gray-800">Guess My Drawing</h1>
-            <div className="flex items-center gap-4">
-              <div className="text-lg font-semibold">
-                Round {gameState.currentRound}/{gameState.totalRounds}
+            <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-3">
+              🎨 <span className="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Guess My Drawing</span>
+            </h1>
+            <div className="flex items-center gap-6">
+              <div className="text-center">
+                <p className="text-sm text-gray-600">Round</p>
+                <p className="text-2xl font-bold text-indigo-600">
+                  {gameState.currentRound}/{gameState.totalRounds}
+                </p>
               </div>
-              <div className={`text-2xl font-bold ${gameState.timeRemaining <= 10 ? 'text-red-500' : 'text-blue-600'}`}>
-                {gameState.timeRemaining}s
+              <div className="text-center">
+                <p className="text-sm text-gray-600">Time</p>
+                <p className={`text-3xl font-black ${gameState.timeRemaining <= 10 ? 'text-red-500 animate-pulse pulse-glow' : 'text-blue-600'}`}>
+                  {gameState.timeRemaining}s
+                </p>
               </div>
+              <button
+                onClick={leaveLobby}
+                className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 text-sm btn-glow"
+              >
+                Leave Game
+              </button>
             </div>
           </div>
           
           {isDrawer && (
-            <div className="mt-2 p-3 bg-blue-50 rounded border border-blue-200">
-              <p className="text-blue-800">
-                <strong>Your word:</strong> <span className="text-xl font-bold">{gameState.currentWord}</span>
+            <div className="mt-4 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl border-2 border-blue-200 card-hover">
+              <p className="text-blue-800 text-center">
+                <span className="font-bold">🎯 Your word:</span>{' '}
+                <span className="text-2xl font-black text-indigo-700 bg-white px-4 py-2 rounded-xl shadow-lg pulse-glow">
+                  {gameState.currentWord}
+                </span>
               </p>
             </div>
           )}
         </div>
 
-        <div className="grid lg:grid-cols-4 gap-4">
-          <div className="lg:col-span-3 space-y-4">
+        <div className="grid lg:grid-cols-4 gap-6">
+          {/* Canvas and Tools */}
+          <div className="lg:col-span-3 space-y-6">
+            {/* Drawing Tools */}
             {isDrawer && (
-              <div className="bg-white rounded-lg shadow p-4">
-                <div className="flex items-center gap-4">
+              <div className="bg-white rounded-2xl shadow-xl p-6 card-hover backdrop-blur-sm bg-opacity-95">
+                <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                  🎨 Drawing Tools
+                </h3>
+                <div className="flex items-center gap-6">
                   <div>
-                    <label className="block text-sm font-medium mb-1">Color</label>
+                    <label className="block text-sm font-bold text-gray-700 mb-2">Color</label>
                     <input
                       type="color"
                       value={currentColor}
                       onChange={(e) => setCurrentColor(e.target.value)}
-                      className="w-12 h-8 border border-gray-300 rounded"
+                      className="w-16 h-12 border-2 border-gray-300 rounded-xl cursor-pointer hover:border-indigo-400 transition-all duration-200 shadow-lg"
                     />
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Brush Size</label>
+                  <div className="flex-1">
+                    <label className="block text-sm font-bold text-gray-700 mb-2">
+                      Brush Size: {strokeWidth}px
+                    </label>
                     <input
                       type="range"
                       min="1"
-                      max="10"
+                      max="12"
                       value={strokeWidth}
                       onChange={(e) => setStrokeWidth(parseInt(e.target.value))}
-                      className="w-24"
+                      className="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
                     />
                   </div>
                   <button
                     onClick={() => setDrawingPaths([])}
-                    className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+                    className="px-6 py-3 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 font-bold transition-all duration-200 transform hover:scale-105 shadow-lg btn-glow"
                   >
-                    Clear
+                    🗑️ Clear
                   </button>
                 </div>
               </div>
             )}
 
-            <div className="bg-white rounded-lg shadow p-4">
+            {/* Canvas */}
+            <div className="bg-white rounded-3xl shadow-2xl p-6 card-hover">
               <DrawingCanvas
                 paths={drawingPaths}
                 setPaths={setDrawingPaths}
@@ -721,8 +889,9 @@ const GuessMyDrawingGame: React.FC = () => {
             </div>
           </div>
 
-          <div className="space-y-4">
-            <PlayerList players={Object.values(players)} gameState={gameState} />
+          {/* Sidebar */}
+          <div className="space-y-6">
+            <PlayerList players={Object.values(players)} gameState={gameState} onLeaveLobby={leaveLobby} />
             <GameChat
               messages={chatMessages}
               onSendMessage={sendChatMessage}
@@ -737,70 +906,149 @@ const GuessMyDrawingGame: React.FC = () => {
   );
 };
 
-// App wrapper with MultiSynq
-const App: React.FC = () => {
-  const [sessionName, setSessionName] = useState('');
-  const [isConnected, setIsConnected] = useState(false);
+// Session Selection Component
+const SessionSelection: React.FC<{ onJoinSession: (code: string) => void }> = ({ onJoinSession }) => {
+  const [sessionCode, setSessionCode] = useState('');
+  const { authenticated, ready, login } = usePrivy();
 
-  const joinSession = () => {
-    if (sessionName.trim()) {
-      setIsConnected(true);
+  const handleJoin = () => {
+    if (sessionCode.trim()) {
+      onJoinSession(sessionCode.trim().toUpperCase());
     }
   };
 
-  if (!isConnected) {
+  const createNewSession = () => {
+    const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    onJoinSession(randomCode);
+  };
+
+  if (!ready) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-400 to-blue-600 flex items-center justify-center p-4">
-        <div className="bg-white rounded-lg shadow-xl p-8 max-w-md w-full">
-          <h1 className="text-3xl font-bold text-center mb-6 text-gray-800">
-            🎨 Guess My Drawing
+      <div className="min-h-screen bg-gradient-primary flex items-center justify-center">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+          <p className="text-center mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authenticated) {
+    return (
+      <div className="min-h-screen bg-gradient-primary flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full text-center card-hover">
+          <div className="text-6xl mb-6 animate-bounce-once">🎨</div>
+          <h1 className="text-4xl font-bold text-gray-800 mb-6 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+            Guess My Drawing
           </h1>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-2">Enter Lobby Code</label>
-              <input
-                type="text"
-                value={sessionName}
-                onChange={(e) => setSessionName(e.target.value)}
-                placeholder="Enter lobby code..."
-                className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <button
-              onClick={joinSession}
-              disabled={!sessionName.trim()}
-              className="w-full py-3 bg-blue-500 text-white rounded-lg font-semibold hover:bg-blue-600 disabled:bg-gray-300"
-            >
-              Join Game
-            </button>
-            <button
-              onClick={() => {
-                const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-                setSessionName(randomCode);
-                setIsConnected(true);
-              }}
-              className="w-full py-3 bg-green-500 text-white rounded-lg font-semibold hover:bg-green-600"
-            >
-              Create New Lobby
-            </button>
-          </div>
+          <p className="text-gray-600 mb-8">
+            A multiplayer drawing & guessing game with blockchain wagering on Monad Testnet
+          </p>
+          <button
+            onClick={login}
+            className="w-full py-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-2xl font-bold text-lg hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
+          >
+            🚀 Connect Wallet & Play
+          </button>
         </div>
       </div>
     );
   }
 
   return (
+    <div className="min-h-screen bg-gradient-primary flex items-center justify-center p-4">
+      <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full card-hover">
+        <div className="text-center mb-8">
+          <div className="text-6xl mb-4 animate-bounce-once">🎨</div>
+          <h1 className="text-3xl font-bold text-gray-800 mb-2 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+            Guess My Drawing
+          </h1>
+          <p className="text-gray-600">Join or create a game session</p>
+        </div>
+
+        <div className="space-y-6">
+          <div>
+            <label className="block text-sm font-bold text-gray-700 mb-2">
+              🔑 Enter Lobby Code
+            </label>
+            <input
+              type="text"
+              value={sessionCode}
+              onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
+              placeholder="Enter lobby code..."
+              className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-mono text-center shadow-inner"
+              maxLength={6}
+            />
+          </div>
+
+          <button
+            onClick={handleJoin}
+            disabled={!sessionCode.trim()}
+            className="w-full py-3 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 transition-all duration-300 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
+          >
+            🚪 Join Game
+          </button>
+
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-gray-300"></div>
+            </div>
+            <div className="relative flex justify-center text-sm">
+              <span className="px-2 bg-white text-gray-500">or</span>
+            </div>
+          </div>
+
+          <button
+            onClick={createNewSession}
+            className="w-full py-3 bg-gradient-success text-white rounded-xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
+          >
+            ✨ Create New Lobby
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Game wrapper with session code
+const GameWithSession: React.FC<{ sessionCode: string }> = ({ sessionCode }) => {
+  return (
     <ReactTogether
       sessionParams={{
-        appId: MULTISYNQ_CONFIG.appId,
-        apiKey: MULTISYNQ_CONFIG.apiKey,
-        name: `guess-drawing-${sessionName}`,
-        password: 'game-session'
+        appId: MULTISYNQ_APP_ID,
+        apiKey: MULTISYNQ_API_KEY,
+        name: `guess-drawing-${sessionCode}`,
+        password: `session-${sessionCode}-password`
       }}
       rememberUsers={true}
     >
-      <GuessMyDrawingGame />
+      <GuessMyDrawingGame sessionCode={sessionCode} />
     </ReactTogether>
+  );
+};
+
+// App wrapper with MultiSynq and Privy
+const App: React.FC = () => {
+  const [sessionCode, setSessionCode] = useState('');
+  const [isConnected, setIsConnected] = useState(false);
+
+  const handleJoinSession = (code: string) => {
+    setSessionCode(code);
+    setIsConnected(true);
+  };
+
+  if (!isConnected) {
+    return (
+      <PrivyProvider appId={PRIVY_APP_ID}>
+        <SessionSelection onJoinSession={handleJoinSession} />
+      </PrivyProvider>
+    );
+  }
+
+  return (
+    <PrivyProvider appId={PRIVY_APP_ID}>
+      <GameWithSession sessionCode={sessionCode} />
+    </PrivyProvider>
   );
 };
 
