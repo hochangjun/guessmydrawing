@@ -686,7 +686,7 @@ const GuessMyDrawingGame: React.FC = () => {
                     <input
                       type="range"
                       min="1"
-                      max="10"
+                      max="30"
                       value={strokeWidth}
                       onChange={(e) => setStrokeWidth(parseInt(e.target.value))}
                       className="w-24"

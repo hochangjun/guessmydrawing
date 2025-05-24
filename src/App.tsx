@@ -546,6 +546,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
   const [drawingPaths, setDrawingPaths] = useStateTogether<DrawingPath[]>('drawingPaths', []);
   const [players, setPlayers] = useStateTogether<Record<string, Player>>('players', {});
   const [chatMessages, setChatMessages] = useStateTogether<ChatMessage[]>('chatMessages', []);
+  const [usedWords, setUsedWords] = useStateTogether<string[]>('usedWords', []); // Track used words
 
   // Local state
   const [currentColor, setCurrentColor] = useState('#4f46e5');
@@ -644,26 +645,43 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
 
   // Auto-advance round when time runs out OR everyone has guessed correctly
   useEffect(() => {
-    if (gameState.phase === 'playing' && gameState.lobbyOwner === currentPlayerKey) {
+    if (gameState.phase === 'playing' && gameState.lobbyOwner === currentPlayerKey && gameState.timeRemaining >= 0) {
       const activePlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
       const nonDrawerPlayers = activePlayers.filter((p: Player) => p.id !== gameState.currentDrawer);
       const safeGuessedCorrectly = gameState.guessedCorrectly || [];
       const allGuessedCorrectly = nonDrawerPlayers.length > 0 && 
         nonDrawerPlayers.every(p => safeGuessedCorrectly.includes(p.id));
       
-      if (gameState.timeRemaining === 0 || allGuessedCorrectly) {
-        // Use a ref to prevent multiple calls
-        if (!window.nextRoundTriggered) {
-          window.nextRoundTriggered = true;
-          setTimeout(() => {
-            nextRound();
-            // Reset the flag after delay
-            setTimeout(() => { window.nextRoundTriggered = false; }, 1000);
-          }, 3000);
-        }
+      console.log('🔍 Round advance check:', {
+        timeRemaining: gameState.timeRemaining,
+        allGuessedCorrectly,
+        nonDrawerPlayers: nonDrawerPlayers.length,
+        guessedCount: safeGuessedCorrectly.length,
+        nextRoundTriggered: window.nextRoundTriggered
+      });
+      
+      if ((gameState.timeRemaining === 0 || allGuessedCorrectly) && !window.nextRoundTriggered) {
+        console.log('🚀 Triggering next round...');
+        window.nextRoundTriggered = true;
+        setTimeout(() => {
+          nextRound();
+          // Reset the flag after delay
+          setTimeout(() => { 
+            window.nextRoundTriggered = false; 
+            console.log('🔄 Reset nextRoundTriggered flag');
+          }, 2000);
+        }, 3000);
       }
     }
-  }, [gameState.timeRemaining, gameState.phase, gameState.lobbyOwner, currentPlayerKey]);
+  }, [
+    gameState.timeRemaining, 
+    gameState.phase, 
+    gameState.lobbyOwner, 
+    gameState.currentDrawer,
+    gameState.guessedCorrectly?.length, // Track changes in guessed correctly count
+    currentPlayerKey, 
+    Object.keys(players).length // Track player count changes
+  ]);
 
   // Initialize player when connecting - fix lobby owner logic
   useEffect(() => {
@@ -773,6 +791,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       console.log('Signer Address:', signerAddress);
       console.log('Session Code:', gameState.sessionCode);
       console.log('Wager Amount:', gameState.wagerAmount);
+      console.log('Lobby Owner:', gameState.lobbyOwner);
       
       // Check if contract address is set
       if ((GAME_ESCROW_ADDRESS as string) === ZERO_ADDRESS) {
@@ -789,48 +808,69 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       // Create contract instance
       const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
       
-      // Check if game exists in contract first
-      try {
-        const gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
-        console.log('📋 Game Info from Contract:', gameInfo);
-        
-        if (gameInfo.owner === ZERO_ADDRESS) {
-          // Game doesn't exist, create it if we're the lobby owner
-          if (gameState.lobbyOwner === currentPlayerKey) {
-            console.log('🎮 Creating game in smart contract...');
-            const wagerWei = ethers.parseEther(gameState.wagerAmount.toString());
-            const createTx = await gameEscrowContract.createGame(gameState.sessionCode, wagerWei);
-            console.log('⏳ Create transaction sent:', createTx.hash);
-            await createTx.wait();
-            console.log('✅ Game created in smart contract!');
-            
-            // Fetch updated game info
-            const updatedGameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
-            console.log('📋 Updated Game Info:', updatedGameInfo);
+      // Check if game exists in contract with retry logic
+      let gameInfo;
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        try {
+          gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+          console.log('📋 Game Info from Contract (attempt', attempts + 1, '):', gameInfo);
+          
+          if (gameInfo.owner === ZERO_ADDRESS) {
+            // Game doesn't exist, create it if we're the lobby owner
+            if (gameState.lobbyOwner === currentPlayerKey) {
+              console.log('🎮 Creating game in smart contract...');
+              const wagerWei = ethers.parseEther(gameState.wagerAmount.toString());
+              const createTx = await gameEscrowContract.createGame(gameState.sessionCode, wagerWei);
+              console.log('⏳ Create transaction sent:', createTx.hash);
+              await createTx.wait();
+              console.log('✅ Game created in smart contract!');
+              
+              // Fetch updated game info
+              gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+              console.log('📋 Updated Game Info:', gameInfo);
+              break;
+            } else {
+              // Wait a bit and retry - lobby owner might be creating the game
+              console.log('⏳ Waiting for lobby owner to create game... (attempt', attempts + 1, ')');
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              attempts++;
+              continue;
+            }
           } else {
-            alert('Game does not exist in smart contract. Lobby owner needs to create it first.');
+            // Game exists, proceed
+            break;
+          }
+        } catch (contractError: any) {
+          console.error('❌ Contract interaction error (attempt', attempts + 1, '):', contractError);
+          if (attempts === maxAttempts - 1) {
+            alert(`Contract error: ${contractError.message || 'Unknown contract error'}`);
             return;
           }
+          attempts++;
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-        
-        // Check if player already deposited
-        const hasDeposited = await gameEscrowContract.hasPlayerDeposited(gameState.sessionCode, signerAddress);
-        if (hasDeposited) {
-          alert('You have already deposited your wager for this game.');
-          return;
-        }
-        
-        // Verify wager amount matches
-        const contractWagerWei = gameInfo.wagerAmount;
-        const expectedWagerWei = ethers.parseEther(gameState.wagerAmount.toString());
-        if (contractWagerWei.toString() !== expectedWagerWei.toString()) {
-          alert(`Wager amount mismatch!\nContract: ${ethers.formatEther(contractWagerWei)} MON\nExpected: ${gameState.wagerAmount} MON`);
-          return;
-        }
-        
-      } catch (contractError: any) {
-        console.error('❌ Contract interaction error:', contractError);
-        alert(`Contract error: ${contractError.message || 'Unknown contract error'}`);
+      }
+      
+      if (!gameInfo || gameInfo.owner === ZERO_ADDRESS) {
+        alert('Game could not be created in smart contract. Please try again or ask the lobby owner to create it first.');
+        return;
+      }
+      
+      // Check if player already deposited
+      const hasDeposited = await gameEscrowContract.hasPlayerDeposited(gameState.sessionCode, signerAddress);
+      if (hasDeposited) {
+        alert('You have already deposited your wager for this game.');
+        return;
+      }
+      
+      // Verify wager amount matches
+      const contractWagerWei = gameInfo.wagerAmount;
+      const expectedWagerWei = ethers.parseEther(gameState.wagerAmount.toString());
+      if (contractWagerWei.toString() !== expectedWagerWei.toString()) {
+        alert(`Wager amount mismatch!\nContract: ${ethers.formatEther(contractWagerWei)} MON\nExpected: ${gameState.wagerAmount} MON`);
         return;
       }
       
@@ -907,9 +947,27 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
     }
   };
 
+  // Helper function to get a random unused word
+  const getRandomWord = () => {
+    const availableWords = WORD_BANK.filter(word => !usedWords.includes(word));
+    
+    // If all words have been used, reset the used words list
+    if (availableWords.length === 0) {
+      setUsedWords([]);
+      return WORD_BANK[Math.floor(Math.random() * WORD_BANK.length)];
+    }
+    
+    const selectedWord = availableWords[Math.floor(Math.random() * availableWords.length)];
+    setUsedWords(prev => [...prev, selectedWord]);
+    return selectedWord;
+  };
+
   // Game functions with optimistic updates
   const startGame = () => {
-    if (gameState.lobbyOwner !== currentPlayerKey) return;
+    if (gameState.lobbyOwner !== currentPlayerKey) {
+      console.log('❌ Not lobby owner. Lobby owner:', gameState.lobbyOwner, 'Current:', currentPlayerKey);
+      return;
+    }
     
     const readyPlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
     if (readyPlayers.length < 2) {
@@ -918,7 +976,12 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
     }
 
     const firstDrawer = readyPlayers[0];
-    const word = WORD_BANK[Math.floor(Math.random() * WORD_BANK.length)];
+    const word = getRandomWord();
+
+    console.log('🎮 Starting game with word:', word, 'drawer:', firstDrawer.id);
+
+    // Reset used words for new game
+    setUsedWords([word]);
 
     // Optimistic update
     optimisticGameStateRef.current = {
@@ -946,7 +1009,10 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
   };
 
   const nextRound = () => {
-    if (gameState.lobbyOwner !== currentPlayerKey) return;
+    if (gameState.lobbyOwner !== currentPlayerKey) {
+      console.log('❌ Not lobby owner for nextRound. Lobby owner:', gameState.lobbyOwner, 'Current:', currentPlayerKey);
+      return;
+    }
 
     const readyPlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
     const currentDrawerIndex = readyPlayers.findIndex((p: Player) => p.id === gameState.currentDrawer);
@@ -954,6 +1020,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
 
     if (gameState.currentRound >= gameState.totalRounds) {
       // Game finished - automatically distribute prize to winner
+      console.log('🏁 Game finished, moving to finished phase');
       setGameState(prev => ({ ...prev, phase: 'finished' }));
       // Auto-distribute prize after a short delay
       setTimeout(() => distributePrizeToWinner(), 2000);
@@ -961,7 +1028,9 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
     }
 
     const nextDrawer = readyPlayers[nextDrawerIndex];
-    const word = WORD_BANK[Math.floor(Math.random() * WORD_BANK.length)];
+    const word = getRandomWord();
+
+    console.log('➡️ Next round:', gameState.currentRound + 1, 'word:', word, 'drawer:', nextDrawer.id);
 
     // Optimistic update
     optimisticGameStateRef.current = {
@@ -998,12 +1067,30 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       const signer = await provider.getSigner();
       const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
       
+      // First, check who the contract owner is
+      const gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+      const contractOwner = gameInfo.owner;
+      const currentWallet = await signer.getAddress();
+      
+      console.log('🔍 Prize Distribution Debug:');
+      console.log('Contract Owner:', contractOwner);
+      console.log('Current Wallet:', currentWallet);
+      console.log('Lobby Owner (game state):', gameState.lobbyOwner);
+      
+      // Check if current wallet is the contract owner
+      if (contractOwner.toLowerCase() !== currentWallet.toLowerCase()) {
+        console.error('❌ Wallet mismatch: Current wallet is not the game creator in smart contract');
+        alert(`❌ Only the game creator can distribute prizes!\n\nGame Creator: ${contractOwner.slice(0, 6)}...${contractOwner.slice(-4)}\nYour Wallet: ${currentWallet.slice(0, 6)}...${currentWallet.slice(-4)}\n\nPlease connect with the wallet that created this game.`);
+        return;
+      }
+      
       const winner = Object.values(players).reduce((prev: Player, current: Player) => 
         (current.score > prev.score) ? current : prev
       );
 
       if (!winner.walletAddress) {
         console.error('Winner does not have a wallet address');
+        alert('❌ Winner does not have a wallet address. Cannot distribute prize.');
         return;
       }
 
@@ -1021,12 +1108,23 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
       console.log('✅ Prize distribution confirmed!');
       
       // Get final game info from contract
-      const gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
-      console.log('Final game info:', gameInfo);
+      const finalGameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+      console.log('Final game info:', finalGameInfo);
       
     } catch (error: any) {
       console.error('Prize distribution failed:', error);
-      alert(`Prize distribution failed: ${error.message || 'Unknown error'}`);
+      
+      // More specific error messages
+      if (error.message?.includes('Only game owner can call this')) {
+        alert('❌ Only the game creator can distribute prizes!\n\nPlease connect with the wallet that originally created this game in the smart contract.');
+      } else if (error.message?.includes('Game not finished')) {
+        alert('❌ Game is not finished yet. Complete all rounds first.');
+      } else if (error.message?.includes('Prize already distributed')) {
+        alert('ℹ️ Prize has already been distributed for this game.');
+      } else {
+        alert(`Prize distribution failed: ${error.message || 'Unknown error'}\n\nCheck console for details.`);
+      }
+      
       // Don't revert game state - still show finished screen
     } finally {
       setIsDistributingPrize(false);
@@ -1279,14 +1377,53 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                   </div>
                 )}
 
-                {gameState.lobbyOwner === currentPlayerKey && (
-                  <button
-                    onClick={startGame}
-                    disabled={Object.values(players).filter((p: Player) => p.hasPaid).length < 2}
-                    className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 transition-all duration-300 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
-                  >
-                    🚀 Start Game (Owner Only)
-                  </button>
+                {/* Debug information for development */}
+                {process.env.NODE_ENV === 'development' && (
+                  <div className="text-xs text-gray-500 bg-gray-100 p-3 rounded-lg mb-4">
+                    <p><strong>Debug Info:</strong></p>
+                    <p>MyId: {myId}</p>
+                    <p>ConnectedWallet: {connectedWallet || 'None'}</p>
+                    <p>Privy Wallet: {user?.wallet?.address || 'None'}</p>
+                    <p>ConsistentUserId: {consistentUserId}</p>
+                    <p>CurrentPlayerKey: {currentPlayerKey || 'None'}</p>
+                    <p>Lobby Owner: {gameState.lobbyOwner || 'None'}</p>
+                    <p>Is Lobby Owner: {(gameState.lobbyOwner === currentPlayerKey).toString()}</p>
+                    <p>Ready Players: {Object.values(players).filter((p: Player) => p.hasPaid).length}</p>
+                    <p>Total Players: {Object.keys(players).length}</p>
+                  </div>
+                )}
+
+                {/* Show start game button with enhanced logic */}
+                {gameState.lobbyOwner === currentPlayerKey && connectedWallet && (
+                  <div className="space-y-2">
+                    <button
+                      onClick={startGame}
+                      disabled={Object.values(players).filter((p: Player) => p.hasPaid).length < 2}
+                      className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 transition-all duration-300 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
+                    >
+                      🚀 Start Game (Owner Only)
+                    </button>
+                    <p className="text-xs text-blue-600 text-center">
+                      You are the lobby owner
+                    </p>
+                  </div>
+                )}
+
+                {/* Show message for non-owners */}
+                {gameState.lobbyOwner !== currentPlayerKey && connectedWallet && (
+                  <div className="text-center py-4 bg-gradient-to-r from-gray-100 to-gray-200 rounded-2xl border-2 border-gray-300">
+                    <p className="text-gray-600 text-sm">⏳ Waiting for lobby owner to start the game</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Owner: {gameState.lobbyOwner ? `${gameState.lobbyOwner.slice(7, 13)}...` : 'Unknown'}
+                    </p>
+                  </div>
+                )}
+
+                {/* Show message if no wallet connected */}
+                {!connectedWallet && (
+                  <div className="text-center py-4 bg-gradient-to-r from-orange-100 to-yellow-100 rounded-2xl border-2 border-orange-300">
+                    <p className="text-orange-600 text-sm">⚠️ Connect wallet to see game controls</p>
+                  </div>
                 )}
               </div>
             </div>
@@ -1472,7 +1609,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                     <input
                       type="range"
                       min="1"
-                      max="12"
+                      max="30"
                       value={strokeWidth}
                       onChange={(e) => setStrokeWidth(parseInt(e.target.value))}
                       className="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
