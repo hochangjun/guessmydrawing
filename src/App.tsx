@@ -45,6 +45,7 @@ interface Player {
   isReady: boolean;
   walletAddress?: string;
   paymentTxHash?: string;
+  joinedAt: number; // Add timestamp for join order
 }
 
 interface GameState {
@@ -701,23 +702,65 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
           return;
         }
         
+        const joinTimestamp = Date.now();
         const newPlayer: Player = {
           id: playerKey, // Use wallet-based ID
           nickname: allNicknames[myId] || `Player ${connectedWallet.slice(0, 6)}`,
           score: 0,
           hasPaid: false,
           isReady: false,
-          walletAddress: connectedWallet
+          walletAddress: connectedWallet,
+          joinedAt: joinTimestamp
         };
-        setPlayers(prev => ({ ...prev, [playerKey]: newPlayer }));
-
-        // Set lobby owner to the FIRST person who joins (with earliest timestamp), not the latest
-        if (!gameState.lobbyOwner) {
-          setGameState(prev => ({ ...prev, lobbyOwner: playerKey }));
-        }
+        
+        setPlayers(prev => {
+          const updatedPlayers = { ...prev, [playerKey]: newPlayer };
+          
+          // Determine who should be lobby owner based on join timestamps
+          const allPlayers = Object.values(updatedPlayers);
+          const earliestPlayer = allPlayers.reduce((earliest: Player, current: Player) => 
+            current.joinedAt < earliest.joinedAt ? current : earliest
+          );
+          
+          console.log('🏆 Lobby Owner Assignment:');
+          console.log('Current player:', playerKey, 'joined at:', new Date(joinTimestamp).toLocaleTimeString());
+          console.log('All players and join times:');
+          allPlayers.forEach(p => {
+            console.log(`  ${p.id}: ${new Date(p.joinedAt).toLocaleTimeString()}`);
+          });
+          console.log('Earliest player (should be lobby owner):', earliestPlayer.id);
+          console.log('Current lobby owner:', gameState.lobbyOwner);
+          
+          // Set lobby owner to the player who joined earliest
+          if (!gameState.lobbyOwner || gameState.lobbyOwner !== earliestPlayer.id) {
+            console.log('🔄 Updating lobby owner to:', earliestPlayer.id);
+            setGameState(prev => ({ ...prev, lobbyOwner: earliestPlayer.id }));
+          }
+          
+          return updatedPlayers;
+        });
       }
     }
   }, [myId, players, allNicknames, setPlayers, gameState.lobbyOwner, setGameState, authenticated, user, connectedWallet, disconnectWallet]);
+
+  // Additional effect to verify lobby owner when players change
+  useEffect(() => {
+    const allPlayers = Object.values(players);
+    if (allPlayers.length > 0) {
+      const earliestPlayer = allPlayers.reduce((earliest: Player, current: Player) => 
+        current.joinedAt < earliest.joinedAt ? current : earliest
+      );
+      
+      // Correct lobby owner if it's wrong
+      if (gameState.lobbyOwner && gameState.lobbyOwner !== earliestPlayer.id) {
+        console.log('🔧 Correcting lobby owner from', gameState.lobbyOwner, 'to', earliestPlayer.id);
+        setGameState(prev => ({ ...prev, lobbyOwner: earliestPlayer.id }));
+      } else if (!gameState.lobbyOwner && allPlayers.length > 0) {
+        console.log('🔧 Setting initial lobby owner to', earliestPlayer.id);
+        setGameState(prev => ({ ...prev, lobbyOwner: earliestPlayer.id }));
+      }
+    }
+  }, [Object.keys(players).length, gameState.lobbyOwner]);
 
   // Update player wallet address when connectedWallet changes
   useEffect(() => {
@@ -1390,6 +1433,17 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                     <p>Is Lobby Owner: {(gameState.lobbyOwner === currentPlayerKey).toString()}</p>
                     <p>Ready Players: {Object.values(players).filter((p: Player) => p.hasPaid).length}</p>
                     <p>Total Players: {Object.keys(players).length}</p>
+                    <div className="mt-2">
+                      <p><strong>Join Order:</strong></p>
+                      {Object.values(players)
+                        .sort((a, b) => a.joinedAt - b.joinedAt)
+                        .map((p, index) => (
+                          <p key={p.id} className="ml-2">
+                            {index + 1}. {p.id.slice(7, 13)}... at {new Date(p.joinedAt).toLocaleTimeString()}
+                            {p.id === gameState.lobbyOwner && ' 👑'}
+                          </p>
+                        ))}
+                    </div>
                   </div>
                 )}
 
