@@ -76,6 +76,7 @@ interface ChatMessage {
 declare global {
   interface Window {
     ethereum?: any;
+    nextRoundTriggered?: boolean;
   }
 }
 
@@ -651,10 +652,18 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
         nonDrawerPlayers.every(p => safeGuessedCorrectly.includes(p.id));
       
       if (gameState.timeRemaining === 0 || allGuessedCorrectly) {
-        setTimeout(() => nextRound(), 3000);
+        // Use a ref to prevent multiple calls
+        if (!window.nextRoundTriggered) {
+          window.nextRoundTriggered = true;
+          setTimeout(() => {
+            nextRound();
+            // Reset the flag after delay
+            setTimeout(() => { window.nextRoundTriggered = false; }, 1000);
+          }, 3000);
+        }
       }
     }
-  }, [gameState.timeRemaining, gameState.phase, gameState.lobbyOwner, gameState.guessedCorrectly, gameState.currentDrawer, currentPlayerKey, players]);
+  }, [gameState.timeRemaining, gameState.phase, gameState.lobbyOwner, currentPlayerKey]);
 
   // Initialize player when connecting - fix lobby owner logic
   useEffect(() => {
@@ -944,9 +953,10 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
     const nextDrawerIndex = (currentDrawerIndex + 1) % readyPlayers.length;
 
     if (gameState.currentRound >= gameState.totalRounds) {
-      // Game finished - distribute prize to winner
-      distributePrizeToWinner();
+      // Game finished - automatically distribute prize to winner
       setGameState(prev => ({ ...prev, phase: 'finished' }));
+      // Auto-distribute prize after a short delay
+      setTimeout(() => distributePrizeToWinner(), 2000);
       return;
     }
 
@@ -984,7 +994,8 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
     }
 
     try {
-      const signer = await ethProvider.getSigner();
+      const provider = new ethers.BrowserProvider(ethProvider);
+      const signer = await provider.getSigner();
       const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
       
       const winner = Object.values(players).reduce((prev: Player, current: Player) => 
@@ -1074,7 +1085,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
     }
   };
 
-  // Fetch contract game info
+  // Fetch contract game info with improved refresh
   const fetchContractGameInfo = async () => {
     if (!ethProvider) return;
     
@@ -1096,12 +1107,23 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
     }
   };
 
-  // Fetch contract info when game state changes
+  // Fetch contract info when game state changes and periodically
   useEffect(() => {
     if (gameState.sessionCode && ethProvider) {
       fetchContractGameInfo();
+      
+      // Refresh contract info every 10 seconds during gameplay
+      const interval = setInterval(fetchContractGameInfo, 10000);
+      return () => clearInterval(interval);
     }
-  }, [gameState.sessionCode, gameState.phase, ethProvider]);
+  }, [gameState.sessionCode, ethProvider]);
+
+  // Additional refresh when players change (for deposit tracking)
+  useEffect(() => {
+    if (gameState.sessionCode && ethProvider && Object.keys(players).length > 0) {
+      fetchContractGameInfo();
+    }
+  }, [Object.keys(players).length, gameState.sessionCode, ethProvider]);
 
   // Authentication check
   if (!ready) {
@@ -1328,7 +1350,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                   <div className="bg-blue-100 border-2 border-blue-300 rounded-xl p-4 mb-4">
                     <div className="flex items-center justify-center gap-3">
                       <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-                      <span className="text-blue-800 font-medium">Distributing prize via smart contract...</span>
+                      <span className="text-blue-800 font-medium">🤖 Automatically distributing prize via smart contract...</span>
                     </div>
                   </div>
                 )}
@@ -1351,21 +1373,12 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                   </div>
                 )}
                 
-                {!isDistributingPrize && !prizeDistributionTx && gameState.lobbyOwner !== currentPlayerKey && (
+                {!isDistributingPrize && !prizeDistributionTx && (
                   <div className="bg-gray-100 border-2 border-gray-300 rounded-xl p-4 mb-4">
                     <p className="text-gray-700 text-sm">
-                      ⏳ Waiting for lobby owner to distribute prize via smart contract...
+                      🤖 Prize distribution is automatic! Please wait a moment...
                     </p>
                   </div>
-                )}
-                
-                {!isDistributingPrize && !prizeDistributionTx && gameState.lobbyOwner === currentPlayerKey && !contractGameInfo?.isFinished && (
-                  <button
-                    onClick={distributePrizeToWinner}
-                    className="mb-4 py-3 px-6 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-xl font-bold hover:from-green-600 hover:to-green-700 transition-all duration-200 shadow-lg btn-glow"
-                  >
-                    💰 Distribute Prize (Owner)
-                  </button>
                 )}
               </div>
 
