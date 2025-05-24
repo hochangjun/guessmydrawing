@@ -334,12 +334,11 @@ const DrawingCanvas: React.FC<{
 const GameChat: React.FC<{
   messages: ChatMessage[];
   onSendMessage: (message: string) => void;
-  currentWord: string | null;
   isDrawer: boolean;
   gamePhase: string;
   myId: string | null;
   guessedCorrectly: string[];
-}> = ({ messages, onSendMessage, currentWord, isDrawer, gamePhase, myId, guessedCorrectly }) => {
+}> = ({ messages, onSendMessage, isDrawer, gamePhase, myId, guessedCorrectly }) => {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -979,33 +978,25 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
 
   // Prize distribution function using smart contract
   const distributePrizeToWinner = async () => {
-    if (!connectedWallet || !currentPlayerKey || gameState.lobbyOwner !== currentPlayerKey) return;
-    
-    const winner = Object.values(players).reduce((prev: Player, current: Player) => 
-      (current.score > prev.score) ? current : prev
-    );
-
-    if (!winner.walletAddress) {
-      console.error('Winner does not have a wallet address');
+    if (!ethProvider || !connectedWallet) {
+      console.error('No ethereum provider or wallet connected');
       return;
     }
 
-    setIsDistributingPrize(true);
-    
     try {
-      await switchToMonadTestnet();
+      const signer = await ethProvider.getSigner();
+      const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
       
-      const provider = new ethers.BrowserProvider(ethProvider || (window as any).ethereum);
-      const signer = await provider.getSigner();
-      
-      // Check if contract address is set
-      if (GAME_ESCROW_ADDRESS === ZERO_ADDRESS) {
-        console.error('Smart contract not deployed yet');
+      const winner = Object.values(players).reduce((prev: Player, current: Player) => 
+        (current.score > prev.score) ? current : prev
+      );
+
+      if (!winner.walletAddress) {
+        console.error('Winner does not have a wallet address');
         return;
       }
-      
-      // Create contract instance
-      const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
+
+      setIsDistributingPrize(true);
       
       console.log(`🏆 Distributing prize to winner: ${winner.walletAddress}`);
 
@@ -1085,7 +1076,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
 
   // Fetch contract game info
   const fetchContractGameInfo = async () => {
-    if (!ethProvider || GAME_ESCROW_ADDRESS === ZERO_ADDRESS) return;
+    if (!ethProvider) return;
     
     try {
       const provider = new ethers.BrowserProvider(ethProvider);
@@ -1212,7 +1203,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                   </p>
                   
                   {/* Contract Status */}
-                  {contractGameInfo && GAME_ESCROW_ADDRESS !== ZERO_ADDRESS && (
+                  {contractGameInfo && (
                     <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-xl">
                       <p className="text-green-800 text-xs font-medium text-center">
                         🔒 Smart Contract Active: {contractGameInfo.playerCount.toString()}/{Object.keys(players).length} players deposited
@@ -1220,13 +1211,6 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                     </div>
                   )}
                   
-                  {GAME_ESCROW_ADDRESS === ZERO_ADDRESS && (
-                    <div className="mt-4 p-3 bg-orange-50 border border-orange-200 rounded-xl">
-                      <p className="text-orange-800 text-xs font-medium text-center">
-                        ⚠️ Smart contract not deployed - using direct transfers
-                      </p>
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -1516,7 +1500,6 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
             <GameChat
               messages={chatMessages || []}
               onSendMessage={sendChatMessage}
-              currentWord={gameState.currentWord}
               isDrawer={isDrawer}
               gamePhase={gameState.phase}
               myId={currentPlayerKey}
