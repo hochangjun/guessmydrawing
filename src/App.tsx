@@ -587,7 +587,7 @@ const GuessMyDrawingGame: React.FC<{
   // Public lobby registration effect
   useEffect(() => {
     if (isCreating && !isPrivate && gameState.lobbyOwner === currentPlayerKey && authenticated) {
-      // Register this lobby as public
+      // Register this lobby as public using global function
       const publicLobbyData: PublicLobby = {
         sessionCode: gameState.sessionCode,
         creatorName: user?.wallet?.address ? 
@@ -600,19 +600,29 @@ const GuessMyDrawingGame: React.FC<{
         isActive: gameState.phase === 'lobby' || gameState.phase === 'playing'
       };
 
-      // Update public lobbies in the global session
-      // Note: This would ideally be done through a separate API call to avoid MultiSynq conflicts
-      console.log('📢 Registering public lobby:', publicLobbyData);
+      if ((window as any).registerPublicLobby) {
+        (window as any).registerPublicLobby(publicLobbyData);
+        console.log('📢 Registered public lobby:', publicLobbyData);
+      }
     }
   }, [isCreating, isPrivate, gameState.lobbyOwner, currentPlayerKey, authenticated, gameState.sessionCode, gameState.wagerAmount, gameState.phase, Object.keys(players).length, user?.wallet?.address]);
 
   // Update public lobby player count
   useEffect(() => {
-    if (!isPrivate && gameState.lobbyOwner === currentPlayerKey) {
-      // Update player count for public lobby
-      console.log('👥 Updating public lobby player count:', Object.keys(players).length);
+    if (!isPrivate && gameState.lobbyOwner === currentPlayerKey && (window as any).updatePublicLobbyPlayerCount) {
+      (window as any).updatePublicLobbyPlayerCount(gameState.sessionCode, Object.keys(players).length);
+      console.log('👥 Updated public lobby player count:', Object.keys(players).length);
     }
-  }, [Object.keys(players).length, isPrivate, gameState.lobbyOwner, currentPlayerKey]);
+  }, [Object.keys(players).length, isPrivate, gameState.lobbyOwner, currentPlayerKey, gameState.sessionCode]);
+
+  // Deactivate public lobby when game starts or ends
+  useEffect(() => {
+    if (!isPrivate && gameState.lobbyOwner === currentPlayerKey && 
+        (gameState.phase === 'finished') && (window as any).deactivatePublicLobby) {
+      (window as any).deactivatePublicLobby(gameState.sessionCode);
+      console.log('🔒 Deactivated public lobby');
+    }
+  }, [gameState.phase, isPrivate, gameState.lobbyOwner, currentPlayerKey, gameState.sessionCode]);
 
   // Disconnect wallet function
   const disconnectWallet = async () => {
@@ -708,11 +718,13 @@ const GuessMyDrawingGame: React.FC<{
       
       console.log('🔍 Round advance check:', {
         currentRound: gameState.currentRound,
+        totalRounds: gameState.totalRounds,
         timeRemaining: gameState.timeRemaining,
         allGuessedCorrectly,
         nonDrawerPlayers: nonDrawerPlayers.length,
         guessedCount: safeGuessedCorrectly.length,
-        roundAdvanceInProgress
+        roundAdvanceInProgress,
+        isLastRound: gameState.currentRound >= gameState.totalRounds
       });
       
       if ((gameState.timeRemaining === 0 || allGuessedCorrectly)) {
@@ -721,7 +733,16 @@ const GuessMyDrawingGame: React.FC<{
         
         // Delay to show results, then advance
         setTimeout(() => {
-          nextRound();
+          if (gameState.currentRound >= gameState.totalRounds) {
+            // Game is finished
+            console.log('🏁 Game finished during auto-advance');
+            setGameState(prev => ({ ...prev, phase: 'finished' }));
+            // Auto-distribute prize after a short delay
+            setTimeout(() => distributePrizeToWinner(), 2000);
+          } else {
+            // Continue to next round
+            nextRound();
+          }
           // Reset the flag after advancement
           setTimeout(() => { 
             setRoundAdvanceInProgress(false);
@@ -734,6 +755,7 @@ const GuessMyDrawingGame: React.FC<{
     gameState.timeRemaining, 
     gameState.phase, 
     gameState.currentRound,
+    gameState.totalRounds,
     gameState.lobbyOwner, 
     gameState.currentDrawer,
     gameState.guessedCorrectly?.length,
@@ -1130,6 +1152,14 @@ const GuessMyDrawingGame: React.FC<{
     const readyPlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
     const currentDrawerIndex = readyPlayers.findIndex((p: Player) => p.id === gameState.currentDrawer);
     const nextDrawerIndex = (currentDrawerIndex + 1) % readyPlayers.length;
+
+    console.log('🔄 NextRound Debug:', {
+      currentRound: gameState.currentRound,
+      totalRounds: gameState.totalRounds,
+      currentDrawerIndex,
+      nextDrawerIndex,
+      readyPlayersCount: readyPlayers.length
+    });
 
     if (gameState.currentRound >= gameState.totalRounds) {
       // Game finished - automatically distribute prize to winner
@@ -1663,18 +1693,23 @@ const GuessMyDrawingGame: React.FC<{
                 {prizeDistributionTx && prizeDistributionTx !== 'already_distributed' && (
                   <div className="bg-green-100 border-2 border-green-300 rounded-xl p-4 mb-4">
                     <p className="text-green-800 font-medium mb-2">💰 Prize Distribution Successful!</p>
-                    <p className="text-sm text-green-700">
-                      <span className="font-bold">Transaction Hash:</span>
+                    <p className="text-sm text-green-700 mb-3">
+                      <span className="font-bold">Winner:</span> {winner.nickname}
                       <br />
+                      <span className="font-bold">Prize Amount:</span> {displayPrizeAmount} MON
+                    </p>
+                    <div className="bg-green-50 p-3 rounded-lg">
+                      <p className="text-xs text-green-600 mb-1 font-medium">Transaction Hash:</p>
                       <a 
                         href={`https://testnet.monadexplorer.com/tx/${prizeDistributionTx}`}
                         target="_blank" 
                         rel="noopener noreferrer"
-                        className="font-mono text-green-600 hover:text-green-800 underline break-all"
+                        className="text-green-700 hover:text-green-900 underline break-all text-sm font-mono bg-white px-2 py-1 rounded border"
                       >
                         {prizeDistributionTx}
                       </a>
-                    </p>
+                      <p className="text-xs text-green-600 mt-1">Click to view on Monad Explorer</p>
+                    </div>
                   </div>
                 )}
                 
@@ -2068,6 +2103,48 @@ const SessionSelectionContent: React.FC<{
   const [publicLobbies, setPublicLobbies] = useStateTogether<Record<string, PublicLobby>>('publicLobbies', {});
   const myId = useMyId();
 
+  // Function to register a public lobby
+  const registerPublicLobby = (lobbyData: PublicLobby) => {
+    console.log('📢 Registering public lobby:', lobbyData);
+    setPublicLobbies(prev => ({
+      ...prev,
+      [lobbyData.sessionCode]: lobbyData
+    }));
+  };
+
+  // Function to update public lobby player count
+  const updatePublicLobbyPlayerCount = (sessionCode: string, playerCount: number) => {
+    setPublicLobbies(prev => {
+      if (prev[sessionCode]) {
+        return {
+          ...prev,
+          [sessionCode]: { ...prev[sessionCode], playerCount }
+        };
+      }
+      return prev;
+    });
+  };
+
+  // Function to mark public lobby as inactive
+  const deactivatePublicLobby = (sessionCode: string) => {
+    setPublicLobbies(prev => {
+      if (prev[sessionCode]) {
+        return {
+          ...prev,
+          [sessionCode]: { ...prev[sessionCode], isActive: false }
+        };
+      }
+      return prev;
+    });
+  };
+
+  // Make these functions available globally for other components
+  useEffect(() => {
+    (window as any).registerPublicLobby = registerPublicLobby;
+    (window as any).updatePublicLobbyPlayerCount = updatePublicLobbyPlayerCount;
+    (window as any).deactivatePublicLobby = deactivatePublicLobby;
+  }, []);
+
   // Clean up old lobbies
   useEffect(() => {
     const cleanup = setInterval(() => {
@@ -2102,38 +2179,48 @@ const SessionSelectionContent: React.FC<{
       <div className="max-w-6xl mx-auto">
         <div className="text-center mb-8">
           <div className="text-6xl mb-4 animate-bounce-once">🎨</div>
-          <h1 className="text-4xl font-bold text-gray-800 mb-2 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+          <h1 className="text-5xl font-bold text-white mb-4 drop-shadow-lg">
             Guess My Drawing
           </h1>
-          <p className="text-gray-600">Join or create a game session</p>
+          <p className="text-white text-lg drop-shadow-md mb-6">Join or create a game session</p>
           
-          <div className="mt-4 flex items-center justify-between max-w-md mx-auto">
-            <button
-              onClick={onLogout}
-              className="px-3 py-1 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200"
-            >
-              Logout
-            </button>
-            
+          <div className="flex items-center justify-center gap-8">
             {connectedWallet ? (
-              <div className="text-right">
-                <p className="text-xs text-green-600">✅ Wallet Connected</p>
-                <p className="text-xs font-mono">{connectedWallet.slice(0, 6)}...{connectedWallet.slice(-4)}</p>
-                <button
-                  onClick={onDisconnectWallet}
-                  className="text-xs text-orange-600 hover:text-orange-700 underline"
-                >
-                  Disconnect
-                </button>
+              <div className="text-center bg-white bg-opacity-20 backdrop-blur-sm rounded-xl px-4 py-3 border border-white border-opacity-30">
+                <p className="text-xs text-green-200">✅ Wallet Connected</p>
+                <p className="text-sm font-mono text-white">{connectedWallet.slice(0, 6)}...{connectedWallet.slice(-4)}</p>
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={onDisconnectWallet}
+                    className="text-xs text-orange-200 hover:text-orange-100 underline"
+                  >
+                    Disconnect
+                  </button>
+                  <span className="text-white text-xs">|</span>
+                  <button
+                    onClick={onLogout}
+                    className="text-xs text-red-200 hover:text-red-100 underline"
+                  >
+                    Logout
+                  </button>
+                </div>
               </div>
             ) : (
-              <button
-                onClick={onConnectWallet}
-                disabled={isConnecting}
-                className="px-3 py-1 bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm rounded-lg hover:from-blue-600 hover:to-blue-700 transition-all duration-200"
-              >
-                {isConnecting ? 'Connecting...' : 'Connect Wallet'}
-              </button>
+              <div className="flex gap-4">
+                <button
+                  onClick={onConnectWallet}
+                  disabled={isConnecting}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all duration-200 shadow-lg"
+                >
+                  {isConnecting ? 'Connecting...' : 'Connect Wallet'}
+                </button>
+                <button
+                  onClick={onLogout}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-all duration-200 shadow-lg"
+                >
+                  Logout
+                </button>
+              </div>
             )}
           </div>
         </div>
