@@ -2,6 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ReactTogether, useStateTogether, useMyId, useAllNicknames } from 'react-together';
 import { PrivyProvider, usePrivy } from '@privy-io/react-auth';
 import { ethers } from 'ethers';
+import { GAME_ESCROW_ABI, GAME_ESCROW_ADDRESS, GameInfo } from './contracts/GameEscrow';
+
+// Constants
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 // Environment Variables
 const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID;
@@ -40,6 +44,7 @@ interface Player {
   hasPaid: boolean;
   isReady: boolean;
   walletAddress?: string;
+  paymentTxHash?: string;
 }
 
 interface GameState {
@@ -55,6 +60,7 @@ interface GameState {
   lobbyOwner: string;
   guessedCorrectly: string[];
   sessionCode: string;
+  createdAt: number;
 }
 
 interface ChatMessage {
@@ -72,6 +78,60 @@ declare global {
     ethereum?: any;
   }
 }
+
+// Helper function to generate a consistent user identifier
+const getConsistentUserId = (user: any, connectedWallet?: string | null): string => {
+  // Always prioritize wallet address if available (most important for blockchain games)
+  if (connectedWallet) {
+    return `wallet:${connectedWallet.toLowerCase()}`;
+  }
+  
+  // Fallback to Privy wallet if available
+  if (user?.wallet?.address) {
+    return `wallet:${user.wallet.address.toLowerCase()}`;
+  }
+  
+  // Fallback to user ID-based identification
+  if (user?.id) {
+    return `user:${user.id}`;
+  }
+  
+  // Last resort - use email if available
+  if (user?.email?.address) {
+    return `email:${user.email.address}`;
+  }
+  
+  return `unknown:${Date.now()}`;
+};
+
+// Helper function to detect ethereum provider
+const detectEthereumProvider = async (): Promise<any> => {
+  if ((window as any).ethereum) {
+    return (window as any).ethereum;
+  }
+
+  return new Promise((resolve) => {
+    let provider: any = null;
+    
+    const handleEthereum = () => {
+      if ((window as any).ethereum) {
+        provider = (window as any).ethereum;
+        resolve(provider);
+      }
+    };
+
+    window.addEventListener('ethereum#initialized', handleEthereum, { once: true });
+    
+    setTimeout(() => {
+      if (!provider && (window as any).ethereum) {
+        provider = (window as any).ethereum;
+      }
+      resolve(provider);
+    }, 3000);
+
+    handleEthereum();
+  });
+};
 
 // Word bank for the game
 const WORD_BANK = [
@@ -98,11 +158,14 @@ const DrawingCanvas: React.FC<{
   canDraw: boolean;
   color: string;
   strokeWidth: number;
-}> = ({ paths, setPaths, canDraw, color, strokeWidth }) => {
+  currentPlayerKey: string | null;
+}> = ({ paths, setPaths, canDraw, color, strokeWidth, currentPlayerKey }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPath, setCurrentPath] = useState<Point[]>([]);
-  const myId = useMyId();
+
+  // Optimistic rendering state
+  const optimisticallyAddedPathRef = useRef<DrawingPath | null>(null);
 
   const getMousePos = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -115,11 +178,11 @@ const DrawingCanvas: React.FC<{
   }, []);
 
   const startDrawing = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canDraw || !myId) return;
+    if (!canDraw || !currentPlayerKey) return;
     setIsDrawing(true);
     const pos = getMousePos(e);
     setCurrentPath([pos]);
-  }, [canDraw, myId, getMousePos]);
+  }, [canDraw, currentPlayerKey, getMousePos]);
 
   const draw = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDrawing || !canDraw) return;
@@ -128,25 +191,39 @@ const DrawingCanvas: React.FC<{
   }, [isDrawing, canDraw, getMousePos]);
 
   const stopDrawing = useCallback(() => {
-    if (!isDrawing || !myId || currentPath.length < 2) {
+    if (!isDrawing || !currentPlayerKey || currentPath.length < 2) {
       setIsDrawing(false);
       setCurrentPath([]);
       return;
     }
 
     const newPath: DrawingPath = {
-      id: `${myId}-${Date.now()}-${Math.random()}`,
-      userId: myId,
+      id: `${currentPlayerKey}-${Date.now()}-${Math.random()}`,
+      userId: currentPlayerKey,
       points: currentPath,
       color,
       strokeWidth,
       timestamp: Date.now()
     };
 
+    // Optimistic rendering - show immediately
+    optimisticallyAddedPathRef.current = newPath;
+    
+    // Update shared state - this will sync across all players
     setPaths([...paths, newPath]);
     setIsDrawing(false);
     setCurrentPath([]);
-  }, [isDrawing, myId, currentPath, color, strokeWidth, paths, setPaths]);
+  }, [isDrawing, currentPlayerKey, currentPath, color, strokeWidth, paths, setPaths]);
+
+  // Check if optimistic path is confirmed
+  useEffect(() => {
+    if (optimisticallyAddedPathRef.current && paths) {
+      const optimisticPathId = optimisticallyAddedPathRef.current.id;
+      if (paths.some(p => p.id === optimisticPathId)) {
+        optimisticallyAddedPathRef.current = null;
+      }
+    }
+  }, [paths]);
 
   // Redraw canvas with enhanced styling
   useEffect(() => {
@@ -180,7 +257,7 @@ const DrawingCanvas: React.FC<{
       ctx.stroke();
     }
 
-    // Draw all completed paths with shadows
+    // Draw all confirmed paths
     paths.forEach(path => {
       if (path.points.length < 2) return;
       ctx.shadowColor = 'rgba(0, 0, 0, 0.1)';
@@ -214,6 +291,24 @@ const DrawingCanvas: React.FC<{
       ctx.stroke();
       ctx.shadowColor = 'transparent';
     }
+
+    // Draw optimistic path
+    const optimisticPath = optimisticallyAddedPathRef.current;
+    if (optimisticPath && (!paths || !paths.some(p => p.id === optimisticPath.id))) {
+      ctx.globalAlpha = 0.7; // Semi-transparent to show it's pending
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.1)';
+      ctx.shadowBlur = 2;
+      ctx.beginPath();
+      ctx.moveTo(optimisticPath.points[0].x, optimisticPath.points[0].y);
+      optimisticPath.points.forEach(point => ctx.lineTo(point.x, point.y));
+      ctx.strokeStyle = optimisticPath.color;
+      ctx.lineWidth = optimisticPath.strokeWidth;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.shadowColor = 'transparent';
+    }
   }, [paths, currentPath, color, strokeWidth]);
 
   return (
@@ -231,13 +326,6 @@ const DrawingCanvas: React.FC<{
         onMouseLeave={stopDrawing}
         style={{ maxWidth: '100%', height: 'auto' }}
       />
-      {!canDraw && (
-        <div className="absolute inset-0 bg-gray-900 bg-opacity-20 rounded-3xl flex items-center justify-center backdrop-blur-sm">
-          <div className="bg-white px-6 py-3 rounded-full shadow-xl border border-gray-200">
-            <span className="text-gray-600 font-medium">🎨 Watch others draw!</span>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
@@ -249,9 +337,14 @@ const GameChat: React.FC<{
   currentWord: string | null;
   isDrawer: boolean;
   gamePhase: string;
-}> = ({ messages, onSendMessage, currentWord, isDrawer, gamePhase }) => {
+  myId: string | null;
+  guessedCorrectly: string[];
+}> = ({ messages, onSendMessage, currentWord, isDrawer, gamePhase, myId, guessedCorrectly }) => {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Ensure guessedCorrectly is always an array
+  const safeGuessedCorrectly = guessedCorrectly || [];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -259,11 +352,14 @@ const GameChat: React.FC<{
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (inputValue.trim() && !isDrawer && gamePhase === 'playing') {
+    if (inputValue.trim() && !isDrawer && gamePhase === 'playing' && !safeGuessedCorrectly.includes(myId || '')) {
       onSendMessage(inputValue.trim());
       setInputValue('');
     }
   };
+
+  // Check if user has already guessed correctly
+  const hasGuessedCorrectly = Boolean(myId && safeGuessedCorrectly.includes(myId));
 
   return (
     <div className="bg-white border-2 border-indigo-200 rounded-3xl p-6 h-96 flex flex-col shadow-2xl card-hover backdrop-blur-sm bg-opacity-95">
@@ -271,22 +367,31 @@ const GameChat: React.FC<{
         💬 Game Chat
       </h3>
       <div className="flex-1 overflow-y-auto mb-4 space-y-3 pr-2">
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`p-3 rounded-xl text-sm transition-all duration-300 transform hover:scale-105 ${
-              msg.isGuess
-                ? msg.isCorrect
-                  ? 'bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 border-l-4 border-green-500 shadow-lg animate-bounce-once'
-                  : 'bg-gradient-to-r from-amber-100 to-yellow-100 text-amber-800 border-l-4 border-amber-500'
-                : 'bg-gradient-to-r from-slate-100 to-gray-100 text-slate-800'
-            }`}
-          >
-            <span className="font-bold text-indigo-600">{msg.userId.slice(0, 8)}:</span>{' '}
-            <span className={msg.isCorrect ? 'font-bold' : ''}>{msg.message}</span>
-            {msg.isCorrect && <span className="ml-2">🎉</span>}
-          </div>
-        ))}
+        {(messages || []).map((msg) => {
+          // Hide correct answers from other players (but show to the person who guessed it)
+          const shouldHideMessage = msg.isCorrect && msg.userId !== myId;
+          
+          return (
+            <div
+              key={msg.id}
+              className={`p-3 rounded-xl text-sm transition-all duration-300 transform hover:scale-105 ${
+                shouldHideMessage
+                  ? 'bg-gradient-to-r from-gray-100 to-gray-100 text-gray-500'
+                  : msg.isGuess
+                  ? msg.isCorrect
+                    ? 'bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 border-l-4 border-green-500 shadow-lg animate-bounce-once'
+                    : 'bg-gradient-to-r from-amber-100 to-yellow-100 text-amber-800 border-l-4 border-amber-500'
+                  : 'bg-gradient-to-r from-slate-100 to-gray-100 text-slate-800'
+              }`}
+            >
+              <span className="font-bold text-indigo-600">{msg.userId.slice(0, 8)}:</span>{' '}
+              <span className={msg.isCorrect && !shouldHideMessage ? 'font-bold' : ''}>
+                {shouldHideMessage ? '✅ guessed correctly!' : msg.message}
+              </span>
+              {msg.isCorrect && !shouldHideMessage && <span className="ml-2">🎉</span>}
+            </div>
+          );
+        })}
         <div ref={messagesEndRef} />
       </div>
       <form onSubmit={handleSubmit} className="flex gap-3">
@@ -297,16 +402,18 @@ const GameChat: React.FC<{
           placeholder={
             isDrawer
               ? "🎨 You're drawing! Others will guess."
+              : hasGuessedCorrectly
+              ? '✅ You guessed correctly! Wait for next round.'
               : gamePhase === 'playing'
               ? '💭 Type your guess...'
               : '⏳ Game not active'
           }
-          disabled={isDrawer || gamePhase !== 'playing'}
+          disabled={isDrawer || gamePhase !== 'playing' || hasGuessedCorrectly}
           className="flex-1 px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:bg-gray-100 transition-all duration-200 shadow-inner"
         />
         <button
           type="submit"
-          disabled={isDrawer || gamePhase !== 'playing' || !inputValue.trim()}
+          disabled={isDrawer || gamePhase !== 'playing' || !inputValue.trim() || hasGuessedCorrectly}
           className="px-6 py-3 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-xl hover:from-indigo-600 hover:to-purple-700 disabled:from-gray-300 disabled:to-gray-400 font-medium transition-all duration-200 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
         >
           Send
@@ -317,10 +424,18 @@ const GameChat: React.FC<{
 };
 
 // Enhanced Player List Component
-const PlayerList: React.FC<{ players: Player[]; gameState: GameState; onLeaveLobby?: () => void }> = ({ 
+const PlayerList: React.FC<{ 
+  players: Player[]; 
+  gameState: GameState; 
+  onLeaveLobby?: () => void;
+  connectedWallet?: string | null;
+  onDisconnectWallet?: () => void;
+}> = ({ 
   players, 
   gameState, 
-  onLeaveLobby 
+  onLeaveLobby,
+  connectedWallet,
+  onDisconnectWallet
 }) => {
   return (
     <div className="bg-white border-2 border-indigo-200 rounded-3xl p-6 shadow-2xl card-hover backdrop-blur-sm bg-opacity-95">
@@ -328,15 +443,37 @@ const PlayerList: React.FC<{ players: Player[]; gameState: GameState; onLeaveLob
         <h3 className="text-xl font-bold text-indigo-800 flex items-center">
           👥 Players ({players.length}/9)
         </h3>
-        {onLeaveLobby && (
-          <button
-            onClick={onLeaveLobby}
-            className="px-3 py-1 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 shadow-md btn-glow"
-          >
-            Leave
-          </button>
-        )}
+        <div className="flex gap-2">
+          {connectedWallet && onDisconnectWallet && (
+            <button
+              onClick={onDisconnectWallet}
+              className="px-3 py-1 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-sm rounded-lg hover:from-orange-600 hover:to-orange-700 transition-all duration-200 shadow-md btn-glow"
+              title="Disconnect Wallet"
+            >
+              Disconnect
+            </button>
+          )}
+          {onLeaveLobby && (
+            <button
+              onClick={onLeaveLobby}
+              className="px-3 py-1 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 shadow-md btn-glow"
+            >
+              Leave
+            </button>
+          )}
+        </div>
       </div>
+      
+      {connectedWallet && (
+        <div className="mb-4 p-3 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200">
+          <div className="text-sm">
+            <span className="font-medium text-blue-800">Connected Wallet:</span>
+            <br />
+            <span className="font-mono text-blue-600">{connectedWallet.slice(0, 6)}...{connectedWallet.slice(-4)}</span>
+          </div>
+        </div>
+      )}
+      
       <div className="space-y-3">
         {players.map((player) => (
           <div
@@ -376,12 +513,20 @@ const PlayerList: React.FC<{ players: Player[]; gameState: GameState; onLeaveLob
 };
 
 // Main Game Component
-const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) => {
+const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }> = ({ sessionCode, wagerAmount }) => {
   const myId = useMyId();
   const allNicknames = useAllNicknames();
   const { user, authenticated, ready, login, logout } = usePrivy();
 
-  // Game state
+  // Wallet state
+  const [connectedWallet, setConnectedWallet] = useState<string | null>(null);
+  const [ethProvider, setEthProvider] = useState<any>(null);
+  const [isPaying, setIsPaying] = useState<boolean>(false);
+  const [isDistributingPrize, setIsDistributingPrize] = useState<boolean>(false);
+  const [prizeDistributionTx, setPrizeDistributionTx] = useState<string | null>(null);
+  const [contractGameInfo, setContractGameInfo] = useState<GameInfo | null>(null);
+
+  // Game state with optimistic updates
   const [gameState, setGameState] = useStateTogether<GameState>('gameState', {
     phase: 'lobby',
     currentRound: 0,
@@ -391,10 +536,11 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
     timeRemaining: 60,
     roundStartTime: 0,
     scores: {},
-    wagerAmount: 0.01,
+    wagerAmount: wagerAmount, // Set from props and immutable
     lobbyOwner: '',
     guessedCorrectly: [],
-    sessionCode: sessionCode
+    sessionCode: sessionCode,
+    createdAt: Date.now()
   });
 
   const [drawingPaths, setDrawingPaths] = useStateTogether<DrawingPath[]>('drawingPaths', []);
@@ -404,6 +550,83 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
   // Local state
   const [currentColor, setCurrentColor] = useState('#4f46e5');
   const [strokeWidth, setStrokeWidth] = useState(4);
+
+  // Optimistic state
+  const optimisticGameStateRef = useRef<Partial<GameState> | null>(null);
+
+  // Get consistent user ID - prioritize connectedWallet over Privy wallet
+  const consistentUserId = getConsistentUserId(user, connectedWallet);
+
+  // Get current player using wallet-based key
+  const currentPlayerKey = connectedWallet ? `wallet:${connectedWallet.toLowerCase()}` : null;
+  const currentPlayer = currentPlayerKey ? players[currentPlayerKey] : null;
+  const isDrawer = Boolean(currentPlayerKey && gameState.currentDrawer === currentPlayerKey);
+  const canDraw = isDrawer && gameState.phase === 'playing';
+
+  // Disconnect wallet function
+  const disconnectWallet = async () => {
+    setConnectedWallet(null);
+    // Update player info to remove wallet address
+    if (currentPlayerKey && players[currentPlayerKey]) {
+      setPlayers(prev => ({
+        ...prev,
+        [currentPlayerKey]: { ...prev[currentPlayerKey], walletAddress: '', hasPaid: false, isReady: false }
+      }));
+    }
+  };
+
+  // Detect ethereum provider
+  useEffect(() => {
+    const detectProvider = async () => {
+      try {
+        const provider = await detectEthereumProvider();
+        setEthProvider(provider);
+        
+        if (provider && provider.request) {
+          try {
+            const accounts = await provider.request({ method: 'eth_accounts' });
+            if (accounts && accounts.length > 0) {
+              setConnectedWallet(accounts[0]);
+            }
+          } catch (error) {
+            console.log('Could not get accounts:', error);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to detect ethereum provider:', error);
+      }
+    };
+
+    detectProvider();
+  }, []);
+
+  // Listen for account changes
+  useEffect(() => {
+    if (ethProvider && ethProvider.on) {
+      const handleAccountsChanged = (accounts: string[]) => {
+        if (accounts.length > 0) {
+          setConnectedWallet(accounts[0]);
+        } else {
+          setConnectedWallet(null);
+        }
+      };
+
+      ethProvider.on('accountsChanged', handleAccountsChanged);
+      
+      return () => {
+        if (ethProvider.removeListener) {
+          ethProvider.removeListener('accountsChanged', handleAccountsChanged);
+        }
+      };
+    }
+  }, [ethProvider]);
+
+  // Sync with Privy wallet if available and no ethereum provider wallet
+  useEffect(() => {
+    if (user?.wallet?.address && !connectedWallet) {
+      setConnectedWallet(user.wallet.address);
+    }
+  }, [user?.wallet?.address, connectedWallet]);
 
   // Timer effect
   useEffect(() => {
@@ -421,81 +644,230 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
 
   // Auto-advance round when time runs out OR everyone has guessed correctly
   useEffect(() => {
-    if (gameState.phase === 'playing' && gameState.lobbyOwner === myId) {
+    if (gameState.phase === 'playing' && gameState.lobbyOwner === currentPlayerKey) {
       const activePlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
       const nonDrawerPlayers = activePlayers.filter((p: Player) => p.id !== gameState.currentDrawer);
+      const safeGuessedCorrectly = gameState.guessedCorrectly || [];
       const allGuessedCorrectly = nonDrawerPlayers.length > 0 && 
-        nonDrawerPlayers.every(p => gameState.guessedCorrectly.includes(p.id));
+        nonDrawerPlayers.every(p => safeGuessedCorrectly.includes(p.id));
       
       if (gameState.timeRemaining === 0 || allGuessedCorrectly) {
         setTimeout(() => nextRound(), 3000);
       }
     }
-  }, [gameState.timeRemaining, gameState.phase, gameState.lobbyOwner, gameState.guessedCorrectly, gameState.currentDrawer, myId, players]);
+  }, [gameState.timeRemaining, gameState.phase, gameState.lobbyOwner, gameState.guessedCorrectly, gameState.currentDrawer, currentPlayerKey, players]);
 
-  // Initialize player when connecting
+  // Initialize player when connecting - fix lobby owner logic
   useEffect(() => {
-    if (myId && authenticated && user && !players[myId]) {
-      const walletAddress = user.wallet?.address || '';
-      const newPlayer: Player = {
-        id: myId,
-        nickname: allNicknames[myId] || `Player ${myId.slice(0, 6)}`,
-        score: 0,
-        hasPaid: false,
-        isReady: false,
-        walletAddress
-      };
-      setPlayers(prev => ({ ...prev, [myId]: newPlayer }));
+    if (myId && authenticated && user && connectedWallet) {
+      // Use wallet address as the player key instead of myId
+      const playerKey = `wallet:${connectedWallet.toLowerCase()}`;
+      
+      if (!players[playerKey]) {
+        // Check if this wallet is already used by another player key
+        const existingPlayerWithWallet = Object.values(players).find(
+          (p: Player) => p.walletAddress && p.walletAddress.toLowerCase() === connectedWallet.toLowerCase()
+        );
+        
+        if (existingPlayerWithWallet) {
+          alert(`This wallet address is already connected by another player (${existingPlayerWithWallet.nickname}). Please use a different wallet or disconnect from the other session.`);
+          disconnectWallet();
+          return;
+        }
+        
+        const newPlayer: Player = {
+          id: playerKey, // Use wallet-based ID
+          nickname: allNicknames[myId] || `Player ${connectedWallet.slice(0, 6)}`,
+          score: 0,
+          hasPaid: false,
+          isReady: false,
+          walletAddress: connectedWallet
+        };
+        setPlayers(prev => ({ ...prev, [playerKey]: newPlayer }));
 
-      if (Object.keys(players).length === 0 && !gameState.lobbyOwner) {
-        setGameState(prev => ({ ...prev, lobbyOwner: myId }));
+        // Set lobby owner to the FIRST person who joins (with earliest timestamp), not the latest
+        if (!gameState.lobbyOwner) {
+          setGameState(prev => ({ ...prev, lobbyOwner: playerKey }));
+        }
       }
     }
-  }, [myId, players, allNicknames, setPlayers, gameState.lobbyOwner, setGameState, authenticated, user]);
+  }, [myId, players, allNicknames, setPlayers, gameState.lobbyOwner, setGameState, authenticated, user, connectedWallet, disconnectWallet]);
+
+  // Update player wallet address when connectedWallet changes
+  useEffect(() => {
+    if (myId && connectedWallet) {
+      const playerKey = `wallet:${connectedWallet.toLowerCase()}`;
+      
+      // Remove old entries for this myId that don't match current wallet
+      Object.keys(players).forEach(key => {
+        if (key !== playerKey && players[key].walletAddress === connectedWallet) {
+          setPlayers(prev => {
+            const newPlayers = { ...prev };
+            delete newPlayers[key];
+            return newPlayers;
+          });
+        }
+      });
+      
+      // Update current player entry
+      if (players[playerKey] && players[playerKey].walletAddress !== connectedWallet) {
+        setPlayers(prev => ({
+          ...prev,
+          [playerKey]: { ...prev[playerKey], walletAddress: connectedWallet }
+        }));
+      }
+    }
+  }, [myId, connectedWallet, players, setPlayers, disconnectWallet]);
 
   // Blockchain functions
   const switchToMonadTestnet = async () => {
-    if (!window.ethereum) return;
+    const provider = ethProvider || (window as any).ethereum;
+    if (!provider) {
+      throw new Error('No wallet found');
+    }
 
     try {
-      await window.ethereum.request({
+      await provider.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: MONAD_TESTNET.chainId }],
       });
     } catch (switchError: any) {
       if (switchError.code === 4902) {
-        await window.ethereum.request({
+        await provider.request({
           method: 'wallet_addEthereumChain',
           params: [MONAD_TESTNET],
         });
+      } else {
+        throw switchError;
       }
     }
   };
 
   const payWager = async () => {
-    if (!user?.wallet?.address || !myId) return;
+    if (!connectedWallet || !currentPlayerKey) {
+      alert('Please connect your wallet first');
+      return;
+    }
+
+    if (isPaying) return;
+    setIsPaying(true);
 
     try {
       await switchToMonadTestnet();
       
-      const provider = new ethers.BrowserProvider(window.ethereum);
+      const provider = new ethers.BrowserProvider(ethProvider || (window as any).ethereum);
       const signer = await provider.getSigner();
+      const signerAddress = await signer.getAddress();
+      
+      console.log('🔍 Debug Info:');
+      console.log('Connected Wallet:', connectedWallet);
+      console.log('Current Player Key:', currentPlayerKey);
+      console.log('Signer Address:', signerAddress);
+      console.log('Session Code:', gameState.sessionCode);
+      console.log('Wager Amount:', gameState.wagerAmount);
+      
+      // Check if contract address is set
+      if ((GAME_ESCROW_ADDRESS as string) === ZERO_ADDRESS) {
+        alert('Smart contract not deployed yet. Please deploy GameEscrow contract first.');
+        return;
+      }
+      
+      // Verify wallet addresses match
+      if (signerAddress.toLowerCase() !== connectedWallet.toLowerCase()) {
+        alert(`Wallet mismatch detected!\nConnected: ${connectedWallet}\nSigner: ${signerAddress}\n\nPlease refresh and reconnect your wallet.`);
+        return;
+      }
+      
+      // Create contract instance
+      const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
+      
+      // Check if game exists in contract first
+      try {
+        const gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+        console.log('📋 Game Info from Contract:', gameInfo);
+        
+        if (gameInfo.owner === ZERO_ADDRESS) {
+          // Game doesn't exist, create it if we're the lobby owner
+          if (gameState.lobbyOwner === currentPlayerKey) {
+            console.log('🎮 Creating game in smart contract...');
+            const wagerWei = ethers.parseEther(gameState.wagerAmount.toString());
+            const createTx = await gameEscrowContract.createGame(gameState.sessionCode, wagerWei);
+            console.log('⏳ Create transaction sent:', createTx.hash);
+            await createTx.wait();
+            console.log('✅ Game created in smart contract!');
+            
+            // Fetch updated game info
+            const updatedGameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+            console.log('📋 Updated Game Info:', updatedGameInfo);
+          } else {
+            alert('Game does not exist in smart contract. Lobby owner needs to create it first.');
+            return;
+          }
+        }
+        
+        // Check if player already deposited
+        const hasDeposited = await gameEscrowContract.hasPlayerDeposited(gameState.sessionCode, signerAddress);
+        if (hasDeposited) {
+          alert('You have already deposited your wager for this game.');
+          return;
+        }
+        
+        // Verify wager amount matches
+        const contractWagerWei = gameInfo.wagerAmount;
+        const expectedWagerWei = ethers.parseEther(gameState.wagerAmount.toString());
+        if (contractWagerWei.toString() !== expectedWagerWei.toString()) {
+          alert(`Wager amount mismatch!\nContract: ${ethers.formatEther(contractWagerWei)} MON\nExpected: ${gameState.wagerAmount} MON`);
+          return;
+        }
+        
+      } catch (contractError: any) {
+        console.error('❌ Contract interaction error:', contractError);
+        alert(`Contract error: ${contractError.message || 'Unknown contract error'}`);
+        return;
+      }
+      
+      // Deposit wager to the smart contract
       const wagerWei = ethers.parseEther(gameState.wagerAmount.toString());
+      console.log(`💰 Depositing ${gameState.wagerAmount} MON to smart contract...`);
+      
+      try {
+        // Try to estimate gas first to catch errors early
+        const gasEstimate = await gameEscrowContract.depositWager.estimateGas(gameState.sessionCode, {
+          value: wagerWei
+        });
+        console.log('⛽ Gas estimate:', gasEstimate.toString());
+        
+        // Send the actual transaction
+        const tx = await gameEscrowContract.depositWager(gameState.sessionCode, {
+          value: wagerWei,
+          gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+        });
 
-      const tx = await signer.sendTransaction({
-        to: '0x0000000000000000000000000000000000000000',
-        value: wagerWei,
-      });
+        // Optimistic update
+        setPlayers(prev => ({
+          ...prev,
+          [currentPlayerKey]: { ...prev[currentPlayerKey], hasPaid: true, isReady: true, paymentTxHash: tx.hash }
+        }));
 
-      await tx.wait();
-
+        console.log('⏳ Transaction sent:', tx.hash);
+        await tx.wait();
+        console.log('✅ Wager deposited to smart contract!');
+        
+      } catch (txError) {
+        console.error('❌ Transaction error:', txError);
+        throw txError;
+      }
+      
+    } catch (error: any) {
+      console.error('💥 Payment failed:', error);
+      
+      // Revert optimistic update on error
       setPlayers(prev => ({
         ...prev,
-        [myId]: { ...prev[myId], hasPaid: true, isReady: true }
+        [currentPlayerKey]: { ...prev[currentPlayerKey], hasPaid: false, isReady: false, paymentTxHash: undefined }
       }));
 
-    } catch (error: any) {
-      console.error('Payment failed:', error);
+      // More specific error handling
       if (error.message?.includes('insufficient funds')) {
         const userConfirmed = confirm(
           '❌ Insufficient funds! You need testnet MON tokens to pay.\n\n' +
@@ -505,15 +877,31 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
         if (userConfirmed) {
           window.open('https://faucet.monad.xyz', '_blank');
         }
+      } else if (error.message?.includes('Player has already deposited')) {
+        alert('You have already deposited your wager for this game.');
+      } else if (error.message?.includes('user rejected transaction')) {
+        // User cancelled, don't show error
+        console.log('User cancelled transaction');
+      } else if (error.message?.includes('missing revert data')) {
+        alert(`Transaction failed with missing revert data. This usually means:\n\n` +
+              `• Game doesn't exist in contract\n` +
+              `• Wallet address mismatch\n` +
+              `• Insufficient gas or funds\n\n` +
+              `Debug info:\n` +
+              `Connected: ${connectedWallet}\n` +
+              `Session: ${gameState.sessionCode}\n` +
+              `Wager: ${gameState.wagerAmount} MON`);
       } else {
-        alert('Payment failed. Please try again.');
+        alert(`Payment failed: ${error.message || 'Unknown error'}\n\nCheck console for details.`);
       }
+    } finally {
+      setIsPaying(false);
     }
   };
 
-  // Game functions
+  // Game functions with optimistic updates
   const startGame = () => {
-    if (gameState.lobbyOwner !== myId) return;
+    if (gameState.lobbyOwner !== currentPlayerKey) return;
     
     const readyPlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
     if (readyPlayers.length < 2) {
@@ -523,6 +911,17 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
 
     const firstDrawer = readyPlayers[0];
     const word = WORD_BANK[Math.floor(Math.random() * WORD_BANK.length)];
+
+    // Optimistic update
+    optimisticGameStateRef.current = {
+      phase: 'playing',
+      currentRound: 1,
+      currentDrawer: firstDrawer.id,
+      currentWord: word,
+      timeRemaining: 60,
+      roundStartTime: Date.now(),
+      guessedCorrectly: []
+    };
 
     setGameState(prev => ({
       ...prev,
@@ -539,19 +938,31 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
   };
 
   const nextRound = () => {
-    if (gameState.lobbyOwner !== myId) return;
+    if (gameState.lobbyOwner !== currentPlayerKey) return;
 
     const readyPlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
     const currentDrawerIndex = readyPlayers.findIndex((p: Player) => p.id === gameState.currentDrawer);
     const nextDrawerIndex = (currentDrawerIndex + 1) % readyPlayers.length;
 
     if (gameState.currentRound >= gameState.totalRounds) {
+      // Game finished - distribute prize to winner
+      distributePrizeToWinner();
       setGameState(prev => ({ ...prev, phase: 'finished' }));
       return;
     }
 
     const nextDrawer = readyPlayers[nextDrawerIndex];
     const word = WORD_BANK[Math.floor(Math.random() * WORD_BANK.length)];
+
+    // Optimistic update
+    optimisticGameStateRef.current = {
+      currentRound: gameState.currentRound + 1,
+      currentDrawer: nextDrawer.id,
+      currentWord: word,
+      timeRemaining: 60,
+      roundStartTime: Date.now(),
+      guessedCorrectly: []
+    };
 
     setGameState(prev => ({
       ...prev,
@@ -566,15 +977,75 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
     setDrawingPaths([]);
   };
 
-  const sendChatMessage = (message: string) => {
-    if (!myId || !gameState.currentWord) return;
+  // Prize distribution function using smart contract
+  const distributePrizeToWinner = async () => {
+    if (!connectedWallet || !currentPlayerKey || gameState.lobbyOwner !== currentPlayerKey) return;
+    
+    const winner = Object.values(players).reduce((prev: Player, current: Player) => 
+      (current.score > prev.score) ? current : prev
+    );
 
-    const isGuess = gameState.phase === 'playing' && gameState.currentDrawer !== myId;
+    if (!winner.walletAddress) {
+      console.error('Winner does not have a wallet address');
+      return;
+    }
+
+    setIsDistributingPrize(true);
+    
+    try {
+      await switchToMonadTestnet();
+      
+      const provider = new ethers.BrowserProvider(ethProvider || (window as any).ethereum);
+      const signer = await provider.getSigner();
+      
+      // Check if contract address is set
+      if (GAME_ESCROW_ADDRESS === ZERO_ADDRESS) {
+        console.error('Smart contract not deployed yet');
+        return;
+      }
+      
+      // Create contract instance
+      const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, signer);
+      
+      console.log(`🏆 Distributing prize to winner: ${winner.walletAddress}`);
+
+      // Call smart contract to distribute prize
+      const tx = await gameEscrowContract.distributePrize(gameState.sessionCode, winner.walletAddress);
+      
+      setPrizeDistributionTx(tx.hash);
+      console.log(`💰 Prize distribution transaction: ${tx.hash}`);
+      
+      await tx.wait();
+      console.log('✅ Prize distribution confirmed!');
+      
+      // Get final game info from contract
+      const gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+      console.log('Final game info:', gameInfo);
+      
+    } catch (error: any) {
+      console.error('Prize distribution failed:', error);
+      alert(`Prize distribution failed: ${error.message || 'Unknown error'}`);
+      // Don't revert game state - still show finished screen
+    } finally {
+      setIsDistributingPrize(false);
+    }
+  };
+
+  const sendChatMessage = (message: string) => {
+    if (!currentPlayerKey || !gameState.currentWord) return;
+
+    const isGuess = gameState.phase === 'playing' && gameState.currentDrawer !== currentPlayerKey;
     const isCorrect = isGuess && message.toLowerCase() === gameState.currentWord.toLowerCase();
+    const safeGuessedCorrectly = gameState.guessedCorrectly || [];
+
+    // Prevent multiple guesses after already guessing correctly
+    if (isGuess && safeGuessedCorrectly.includes(currentPlayerKey)) {
+      return; // Don't allow more guesses
+    }
 
     const chatMessage: ChatMessage = {
-      id: `${myId}-${Date.now()}`,
-      userId: myId,
+      id: `${currentPlayerKey}-${Date.now()}`,
+      userId: currentPlayerKey,
       message,
       timestamp: Date.now(),
       isGuess,
@@ -583,24 +1054,25 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
 
     setChatMessages(prev => [...prev, chatMessage]);
 
-    if (isCorrect && !gameState.guessedCorrectly.includes(myId)) {
+    if (isCorrect && !safeGuessedCorrectly.includes(currentPlayerKey)) {
       const timeBonus = Math.max(0, Math.floor((gameState.timeRemaining / 60) * 20));
-      const positionBonus = [100, 80, 60, 40][gameState.guessedCorrectly.length] || 40;
+      const positionBonus = [100, 80, 60, 40][safeGuessedCorrectly.length] || 40;
       const totalPoints = positionBonus + timeBonus;
 
+      // Optimistic updates
       setGameState(prev => ({
         ...prev,
         scores: {
           ...prev.scores,
-          [myId]: (prev.scores[myId] || 0) + totalPoints,
+          [currentPlayerKey]: (prev.scores[currentPlayerKey] || 0) + totalPoints,
           [prev.currentDrawer!]: (prev.scores[prev.currentDrawer!] || 0) + 20
         },
-        guessedCorrectly: [...prev.guessedCorrectly, myId]
+        guessedCorrectly: [...(prev.guessedCorrectly || []), currentPlayerKey]
       }));
 
       setPlayers(prev => ({
         ...prev,
-        [myId]: { ...prev[myId], score: (prev[myId]?.score || 0) + totalPoints }
+        [currentPlayerKey]: { ...prev[currentPlayerKey], score: (prev[currentPlayerKey]?.score || 0) + totalPoints }
       }));
     }
   };
@@ -611,9 +1083,34 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
     }
   };
 
-  const currentPlayer = players[myId || ''];
-  const isDrawer = gameState.currentDrawer === myId;
-  const canDraw = isDrawer && gameState.phase === 'playing';
+  // Fetch contract game info
+  const fetchContractGameInfo = async () => {
+    if (!ethProvider || GAME_ESCROW_ADDRESS === ZERO_ADDRESS) return;
+    
+    try {
+      const provider = new ethers.BrowserProvider(ethProvider);
+      const gameEscrowContract = new ethers.Contract(GAME_ESCROW_ADDRESS, GAME_ESCROW_ABI, provider);
+      const gameInfo = await gameEscrowContract.getGameInfo(gameState.sessionCode);
+      
+      setContractGameInfo({
+        owner: gameInfo.owner,
+        wagerAmount: gameInfo.wagerAmount,
+        totalDeposits: gameInfo.totalDeposits,
+        playerCount: gameInfo.playerCount,
+        isFinished: gameInfo.isFinished,
+        winner: gameInfo.winner
+      });
+    } catch (error) {
+      console.error('Failed to fetch contract game info:', error);
+    }
+  };
+
+  // Fetch contract info when game state changes
+  useEffect(() => {
+    if (gameState.sessionCode && ethProvider) {
+      fetchContractGameInfo();
+    }
+  }, [gameState.sessionCode, gameState.phase, ethProvider]);
 
   // Authentication check
   if (!ready) {
@@ -666,7 +1163,15 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <p className="text-sm text-gray-600">Connected as</p>
-                  <p className="font-bold text-indigo-600">{user?.wallet?.address?.slice(0, 6)}...{user?.wallet?.address?.slice(-4)}</p>
+                  <p className="font-bold text-indigo-600">
+                    {connectedWallet ? 
+                      `${connectedWallet.slice(0, 6)}...${connectedWallet.slice(-4)}` : 
+                      user?.id ? `${user.id.slice(0, 6)}...${user.id.slice(-4)}` : 'Unknown'
+                    }
+                  </p>
+                  {connectedWallet && (
+                    <p className="text-xs text-green-600">✅ Wallet</p>
+                  )}
                 </div>
                 <button
                   onClick={logout}
@@ -685,27 +1190,7 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
                   ⚙️ Game Setup
                 </h3>
                 
-                {gameState.lobbyOwner === myId && (
-                  <div className="space-y-4 mb-6">
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-2">
-                        💰 Wager Amount (MON)
-                      </label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0.01"
-                        value={gameState.wagerAmount}
-                        onChange={(e) => setGameState(prev => ({
-                          ...prev,
-                          wagerAmount: parseFloat(e.target.value) || 0.01
-                        }))}
-                        className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-bold shadow-inner"
-                      />
-                    </div>
-                  </div>
-                )}
-
+                {/* Show fixed wager amount */}
                 <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-6 rounded-2xl border-2 border-indigo-200 shadow-inner">
                   <div className="grid grid-cols-2 gap-4 text-center">
                     <div>
@@ -714,39 +1199,99 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
                     </div>
                     <div>
                       <p className="text-sm text-purple-600 font-medium">Total Prize Pool</p>
-                      <p className="text-2xl font-bold text-purple-800">{(gameState.wagerAmount * Object.keys(players).length).toFixed(3)} MON</p>
+                      <p className="text-2xl font-bold text-purple-800">
+                        {contractGameInfo ? 
+                          ethers.formatEther(contractGameInfo.totalDeposits) : 
+                          (gameState.wagerAmount * Object.keys(players).length).toFixed(3)
+                        } MON
+                      </p>
                     </div>
                   </div>
+                  <p className="text-center text-sm text-gray-600 mt-3">
+                    💡 {contractGameInfo ? 'Secured by smart contract' : 'Wager amount fixed by lobby creator'}
+                  </p>
+                  
+                  {/* Contract Status */}
+                  {contractGameInfo && GAME_ESCROW_ADDRESS !== ZERO_ADDRESS && (
+                    <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-xl">
+                      <p className="text-green-800 text-xs font-medium text-center">
+                        🔒 Smart Contract Active: {contractGameInfo.playerCount.toString()}/{Object.keys(players).length} players deposited
+                      </p>
+                    </div>
+                  )}
+                  
+                  {GAME_ESCROW_ADDRESS === ZERO_ADDRESS && (
+                    <div className="mt-4 p-3 bg-orange-50 border border-orange-200 rounded-xl">
+                      <p className="text-orange-800 text-xs font-medium text-center">
+                        ⚠️ Smart contract not deployed - using direct transfers
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="bg-white rounded-3xl shadow-2xl p-8 space-y-4 card-hover backdrop-blur-sm bg-opacity-95">
-                {!currentPlayer?.hasPaid ? (
+                {!connectedWallet ? (
+                  <div className="text-center py-4 bg-gradient-to-r from-orange-100 to-yellow-100 rounded-2xl border-2 border-orange-300 shadow-inner">
+                    <p className="text-orange-700 font-bold text-lg mb-3">⚠️ Wallet Required</p>
+                    <p className="text-orange-600 text-sm">Please connect your wallet to participate</p>
+                    {user?.wallet?.address && (
+                      <p className="text-orange-500 text-xs mt-2">
+                        Privy wallet detected: {user.wallet.address.slice(0, 6)}...{user.wallet.address.slice(-4)}
+                        <br />But browser wallet not connected
+                      </p>
+                    )}
+                  </div>
+                ) : !currentPlayer?.hasPaid ? (
                   <button
                     onClick={payWager}
-                    className="w-full py-4 bg-gradient-success text-white rounded-2xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
+                    disabled={isPaying}
+                    className="w-full py-4 bg-gradient-success text-white rounded-2xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow disabled:opacity-50"
                   >
-                    💳 Pay Wager ({gameState.wagerAmount} MON)
+                    {isPaying ? '⏳ Processing...' : `💳 Pay Wager (${gameState.wagerAmount} MON)`}
                   </button>
                 ) : (
                   <div className="text-center py-4 bg-gradient-to-r from-green-100 to-emerald-100 rounded-2xl border-2 border-green-300 shadow-inner">
                     <span className="text-green-700 font-bold text-lg">✅ Ready to Play!</span>
+                    {currentPlayer.paymentTxHash && (
+                      <p className="text-green-600 text-xs mt-1">
+                        Tx: {currentPlayer.paymentTxHash.slice(0, 10)}...
+                      </p>
+                    )}
                   </div>
                 )}
 
-                {gameState.lobbyOwner === myId && (
+                {/* Debug information */}
+                {process.env.NODE_ENV === 'development' && (
+                  <div className="text-xs text-gray-500 bg-gray-100 p-3 rounded-lg">
+                    <p><strong>Debug Info:</strong></p>
+                    <p>MyId: {myId}</p>
+                    <p>ConnectedWallet: {connectedWallet || 'None'}</p>
+                    <p>Privy Wallet: {user?.wallet?.address || 'None'}</p>
+                    <p>ConsistentUserId: {consistentUserId}</p>
+                    <p>CurrentPlayer WalletAddr: {currentPlayer?.walletAddress || 'None'}</p>
+                  </div>
+                )}
+
+                {gameState.lobbyOwner === currentPlayerKey && (
                   <button
                     onClick={startGame}
                     disabled={Object.values(players).filter((p: Player) => p.hasPaid).length < 2}
                     className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-2xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 transition-all duration-300 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
                   >
-                    🚀 Start Game
+                    🚀 Start Game (Owner Only)
                   </button>
                 )}
               </div>
             </div>
 
-            <PlayerList players={Object.values(players)} gameState={gameState} onLeaveLobby={leaveLobby} />
+            <PlayerList 
+              players={Object.values(players)} 
+              gameState={gameState} 
+              onLeaveLobby={leaveLobby}
+              connectedWallet={connectedWallet}
+              onDisconnectWallet={disconnectWallet}
+            />
           </div>
         </div>
       </div>
@@ -757,6 +1302,11 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
     const winner = Object.values(players).reduce((prev: Player, current: Player) => 
       (current.score > prev.score) ? current : prev
     );
+
+    // Use contract info for prize amount if available, fallback to local calculation
+    const actualPrizeAmount = contractGameInfo ? 
+      ethers.formatEther(contractGameInfo.totalDeposits) : 
+      (gameState.wagerAmount * Object.keys(players).length).toFixed(3);
 
     return (
       <div className="min-h-screen bg-gradient-primary p-4">
@@ -771,12 +1321,76 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
                 <h2 className="text-4xl font-bold text-yellow-800 mb-4 flex items-center justify-center gap-3">
                   🎉 Winner: {winner.nickname}
                 </h2>
-                <p className="text-2xl text-yellow-700 font-bold">
-                  Prize: {(gameState.wagerAmount * Object.keys(players).length).toFixed(3)} MON
+                <p className="text-2xl text-yellow-700 font-bold mb-4">
+                  Prize: {actualPrizeAmount} MON
                 </p>
+                
+                {/* Smart Contract Info */}
+                {contractGameInfo && (
+                  <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 mb-4 text-sm">
+                    <p className="text-blue-800 font-medium mb-2">📋 Smart Contract Details</p>
+                    <div className="grid grid-cols-2 gap-2 text-blue-700">
+                      <div>Game Status: {contractGameInfo.isFinished ? '✅ Finished' : '⏳ Active'}</div>
+                      <div>Players: {contractGameInfo.playerCount.toString()}</div>
+                      <div>Total Deposits: {ethers.formatEther(contractGameInfo.totalDeposits)} MON</div>
+                      <div>Contract Winner: {contractGameInfo.winner !== ZERO_ADDRESS ? 
+                        `${contractGameInfo.winner.slice(0, 6)}...${contractGameInfo.winner.slice(-4)}` : 'None'}</div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Prize Distribution Status */}
+                {isDistributingPrize && (
+                  <div className="bg-blue-100 border-2 border-blue-300 rounded-xl p-4 mb-4">
+                    <div className="flex items-center justify-center gap-3">
+                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                      <span className="text-blue-800 font-medium">Distributing prize via smart contract...</span>
+                    </div>
+                  </div>
+                )}
+                
+                {prizeDistributionTx && (
+                  <div className="bg-green-100 border-2 border-green-300 rounded-xl p-4 mb-4">
+                    <p className="text-green-800 font-medium mb-2">💰 Prize Distribution Successful!</p>
+                    <p className="text-sm text-green-700">
+                      <span className="font-bold">Transaction Hash:</span>
+                      <br />
+                      <a 
+                        href={`https://testnet.monadexplorer.com/tx/${prizeDistributionTx}`}
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="font-mono text-green-600 hover:text-green-800 underline break-all"
+                      >
+                        {prizeDistributionTx}
+                      </a>
+                    </p>
+                  </div>
+                )}
+                
+                {!isDistributingPrize && !prizeDistributionTx && gameState.lobbyOwner !== currentPlayerKey && (
+                  <div className="bg-gray-100 border-2 border-gray-300 rounded-xl p-4 mb-4">
+                    <p className="text-gray-700 text-sm">
+                      ⏳ Waiting for lobby owner to distribute prize via smart contract...
+                    </p>
+                  </div>
+                )}
+                
+                {!isDistributingPrize && !prizeDistributionTx && gameState.lobbyOwner === currentPlayerKey && !contractGameInfo?.isFinished && (
+                  <button
+                    onClick={distributePrizeToWinner}
+                    className="mb-4 py-3 px-6 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-xl font-bold hover:from-green-600 hover:to-green-700 transition-all duration-200 shadow-lg btn-glow"
+                  >
+                    💰 Distribute Prize (Owner)
+                  </button>
+                )}
               </div>
 
-              <PlayerList players={Object.values(players)} gameState={gameState} />
+              <PlayerList 
+                players={Object.values(players)} 
+                gameState={gameState}
+                connectedWallet={connectedWallet}
+                onDisconnectWallet={disconnectWallet}
+              />
 
               <button
                 onClick={() => window.location.reload()}
@@ -885,19 +1499,28 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
                 canDraw={canDraw}
                 color={currentColor}
                 strokeWidth={strokeWidth}
+                currentPlayerKey={currentPlayerKey}
               />
             </div>
           </div>
 
           {/* Sidebar */}
           <div className="space-y-6">
-            <PlayerList players={Object.values(players)} gameState={gameState} onLeaveLobby={leaveLobby} />
+            <PlayerList 
+              players={Object.values(players)} 
+              gameState={gameState} 
+              onLeaveLobby={leaveLobby}
+              connectedWallet={connectedWallet}
+              onDisconnectWallet={disconnectWallet}
+            />
             <GameChat
-              messages={chatMessages}
+              messages={chatMessages || []}
               onSendMessage={sendChatMessage}
               currentWord={gameState.currentWord}
               isDrawer={isDrawer}
               gamePhase={gameState.phase}
+              myId={currentPlayerKey}
+              guessedCorrectly={gameState.guessedCorrectly || []}
             />
           </div>
         </div>
@@ -906,20 +1529,106 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string }> = ({ sessionCode }) 
   );
 };
 
-// Session Selection Component
-const SessionSelection: React.FC<{ onJoinSession: (code: string) => void }> = ({ onJoinSession }) => {
+// Session Selection Component with Wager Amount Input
+const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) => void }> = ({ onJoinSession }) => {
   const [sessionCode, setSessionCode] = useState('');
-  const { authenticated, ready, login } = usePrivy();
+  const [wagerAmount, setWagerAmount] = useState(0.01);
+  const [isCreating, setIsCreating] = useState(false);
+  const [connectedWallet, setConnectedWallet] = useState<string | null>(null);
+  const [ethProvider, setEthProvider] = useState<any>(null);
+  const [isConnecting, setIsConnecting] = useState<boolean>(false);
+  const { authenticated, ready, login, logout, user } = usePrivy();
+
+  // Detect ethereum provider
+  useEffect(() => {
+    const detectProvider = async () => {
+      try {
+        const provider = await detectEthereumProvider();
+        setEthProvider(provider);
+        
+        if (provider && provider.request) {
+          try {
+            const accounts = await provider.request({ method: 'eth_accounts' });
+            if (accounts && accounts.length > 0) {
+              setConnectedWallet(accounts[0]);
+            }
+          } catch (error) {
+            console.log('Could not get accounts:', error);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to detect ethereum provider:', error);
+      }
+    };
+
+    detectProvider();
+  }, []);
+
+  // Listen for account changes
+  useEffect(() => {
+    if (ethProvider && ethProvider.on) {
+      const handleAccountsChanged = (accounts: string[]) => {
+        if (accounts.length > 0) {
+          setConnectedWallet(accounts[0]);
+        } else {
+          setConnectedWallet(null);
+        }
+      };
+
+      ethProvider.on('accountsChanged', handleAccountsChanged);
+      
+      return () => {
+        if (ethProvider.removeListener) {
+          ethProvider.removeListener('accountsChanged', handleAccountsChanged);
+        }
+      };
+    }
+  }, [ethProvider]);
+
+  // Sync with Privy wallet if available and no ethereum provider wallet
+  useEffect(() => {
+    if (user?.wallet?.address && !connectedWallet) {
+      setConnectedWallet(user.wallet.address);
+    }
+  }, [user?.wallet?.address, connectedWallet]);
+
+  const connectWallet = async () => {
+    if (isConnecting) return;
+    
+    setIsConnecting(true);
+    try {
+      const provider = ethProvider || (window as any).ethereum;
+      if (!provider) {
+        alert('No wallet detected. Please ensure you have a wallet extension installed.');
+        return;
+      }
+
+      const accounts = await provider.request({ method: 'eth_requestAccounts' });
+      if (accounts && accounts.length > 0) {
+        setConnectedWallet(accounts[0]);
+      }
+    } catch (error: any) {
+      console.error('Failed to connect wallet:', error);
+      alert(`Failed to connect wallet: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const disconnectWallet = () => {
+    setConnectedWallet(null);
+  };
 
   const handleJoin = () => {
     if (sessionCode.trim()) {
-      onJoinSession(sessionCode.trim().toUpperCase());
+      onJoinSession(sessionCode.trim().toUpperCase(), wagerAmount);
     }
   };
 
   const createNewSession = () => {
+    setIsCreating(true);
     const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-    onJoinSession(randomCode);
+    onJoinSession(randomCode, wagerAmount);
   };
 
   if (!ready) {
@@ -948,7 +1657,7 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string) => void }> = ({
             onClick={login}
             className="w-full py-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-2xl font-bold text-lg hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
           >
-            🚀 Connect Wallet & Play
+            🚀 Connect Account & Play
           </button>
         </div>
       </div>
@@ -964,6 +1673,36 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string) => void }> = ({
             Guess My Drawing
           </h1>
           <p className="text-gray-600">Join or create a game session</p>
+          
+          <div className="mt-4 flex items-center justify-between">
+            <button
+              onClick={logout}
+              className="px-3 py-1 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200"
+            >
+              Logout
+            </button>
+            
+            {connectedWallet ? (
+              <div className="text-right">
+                <p className="text-xs text-green-600">✅ Wallet Connected</p>
+                <p className="text-xs font-mono">{connectedWallet.slice(0, 6)}...{connectedWallet.slice(-4)}</p>
+                <button
+                  onClick={disconnectWallet}
+                  className="text-xs text-orange-600 hover:text-orange-700 underline"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={connectWallet}
+                disabled={isConnecting}
+                className="px-3 py-1 bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm rounded-lg hover:from-blue-600 hover:to-blue-700 transition-all duration-200"
+              >
+                {isConnecting ? 'Connecting...' : 'Connect Wallet'}
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="space-y-6">
@@ -998,20 +1737,38 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string) => void }> = ({
             </div>
           </div>
 
-          <button
-            onClick={createNewSession}
-            className="w-full py-3 bg-gradient-success text-white rounded-xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
-          >
-            ✨ Create New Lobby
-          </button>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-bold text-gray-700 mb-2">
+                💰 Set Wager Amount (MON)
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={wagerAmount}
+                onChange={(e) => setWagerAmount(parseFloat(e.target.value) || 0.01)}
+                className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-bold shadow-inner"
+              />
+              <p className="text-xs text-gray-500 mt-1">This amount will be required from all players</p>
+            </div>
+
+            <button
+              onClick={createNewSession}
+              disabled={isCreating}
+              className="w-full py-3 bg-gradient-success text-white rounded-xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
+            >
+              {isCreating ? '⏳ Creating...' : '✨ Create New Lobby'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-// Game wrapper with session code
-const GameWithSession: React.FC<{ sessionCode: string }> = ({ sessionCode }) => {
+// Game wrapper with session code and wager
+const GameWithSession: React.FC<{ sessionCode: string; wagerAmount: number }> = ({ sessionCode, wagerAmount }) => {
   return (
     <ReactTogether
       sessionParams={{
@@ -1022,7 +1779,7 @@ const GameWithSession: React.FC<{ sessionCode: string }> = ({ sessionCode }) => 
       }}
       rememberUsers={true}
     >
-      <GuessMyDrawingGame sessionCode={sessionCode} />
+      <GuessMyDrawingGame sessionCode={sessionCode} wagerAmount={wagerAmount} />
     </ReactTogether>
   );
 };
@@ -1030,10 +1787,12 @@ const GameWithSession: React.FC<{ sessionCode: string }> = ({ sessionCode }) => 
 // App wrapper with MultiSynq and Privy
 const App: React.FC = () => {
   const [sessionCode, setSessionCode] = useState('');
+  const [wagerAmount, setWagerAmount] = useState(0.01);
   const [isConnected, setIsConnected] = useState(false);
 
-  const handleJoinSession = (code: string) => {
+  const handleJoinSession = (code: string, wager: number) => {
     setSessionCode(code);
+    setWagerAmount(wager);
     setIsConnected(true);
   };
 
@@ -1047,7 +1806,7 @@ const App: React.FC = () => {
 
   return (
     <PrivyProvider appId={PRIVY_APP_ID}>
-      <GameWithSession sessionCode={sessionCode} />
+      <GameWithSession sessionCode={sessionCode} wagerAmount={wagerAmount} />
     </PrivyProvider>
   );
 };
