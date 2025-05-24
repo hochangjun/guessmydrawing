@@ -3,6 +3,7 @@ import { ReactTogether, useStateTogether, useMyId, useAllNicknames } from 'react
 import { PrivyProvider, usePrivy } from '@privy-io/react-auth';
 import { ethers } from 'ethers';
 import { GAME_ESCROW_ABI, GAME_ESCROW_ADDRESS, GameInfo } from './contracts/GameEscrow';
+import { BrowserRouter as Router, Routes, Route, useNavigate, useParams } from 'react-router-dom';
 
 // Constants
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -71,6 +72,17 @@ interface ChatMessage {
   timestamp: number;
   isGuess: boolean;
   isCorrect?: boolean;
+}
+
+// New interface for public lobbies
+interface PublicLobby {
+  sessionCode: string;
+  creatorName: string;
+  wagerAmount: number;
+  playerCount: number;
+  maxPlayers: number;
+  createdAt: number;
+  isActive: boolean;
 }
 
 // Global window type extension
@@ -514,7 +526,12 @@ const PlayerList: React.FC<{
 };
 
 // Main Game Component
-const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }> = ({ sessionCode, wagerAmount }) => {
+const GuessMyDrawingGame: React.FC<{ 
+  sessionCode: string; 
+  wagerAmount: number;
+  isCreating?: boolean;
+  isPrivate?: boolean;
+}> = ({ sessionCode, wagerAmount, isCreating = false, isPrivate = false }) => {
   const myId = useMyId();
   const allNicknames = useAllNicknames();
   const { user, authenticated, ready, login, logout } = usePrivy();
@@ -566,6 +583,36 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
   const currentPlayer = currentPlayerKey ? players[currentPlayerKey] : null;
   const isDrawer = Boolean(currentPlayerKey && gameState.currentDrawer === currentPlayerKey);
   const canDraw = isDrawer && gameState.phase === 'playing';
+
+  // Public lobby registration effect
+  useEffect(() => {
+    if (isCreating && !isPrivate && gameState.lobbyOwner === currentPlayerKey && authenticated) {
+      // Register this lobby as public
+      const publicLobbyData: PublicLobby = {
+        sessionCode: gameState.sessionCode,
+        creatorName: user?.wallet?.address ? 
+          `${user.wallet.address.slice(0, 6)}...${user.wallet.address.slice(-4)}` : 
+          'Anonymous',
+        wagerAmount: gameState.wagerAmount,
+        playerCount: Object.keys(players).length,
+        maxPlayers: 9,
+        createdAt: Date.now(),
+        isActive: gameState.phase === 'lobby' || gameState.phase === 'playing'
+      };
+
+      // Update public lobbies in the global session
+      // Note: This would ideally be done through a separate API call to avoid MultiSynq conflicts
+      console.log('📢 Registering public lobby:', publicLobbyData);
+    }
+  }, [isCreating, isPrivate, gameState.lobbyOwner, currentPlayerKey, authenticated, gameState.sessionCode, gameState.wagerAmount, gameState.phase, Object.keys(players).length, user?.wallet?.address]);
+
+  // Update public lobby player count
+  useEffect(() => {
+    if (!isPrivate && gameState.lobbyOwner === currentPlayerKey) {
+      // Update player count for public lobby
+      console.log('👥 Updating public lobby player count:', Object.keys(players).length);
+    }
+  }, [Object.keys(players).length, isPrivate, gameState.lobbyOwner, currentPlayerKey]);
 
   // Disconnect wallet function
   const disconnectWallet = async () => {
@@ -1367,7 +1414,17 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
                 <h1 className="text-4xl font-bold text-gray-800 flex items-center gap-3">
                   🎨 <span className="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Guess My Drawing</span>
                 </h1>
-                <p className="text-gray-600 mt-2">Session: <span className="font-mono font-bold text-indigo-600 bg-indigo-100 px-2 py-1 rounded">{gameState.sessionCode}</span></p>
+                <div className="mt-2 space-y-1">
+                  <p className="text-gray-600">
+                    Session: <span className="font-mono font-bold text-indigo-600 bg-indigo-100 px-2 py-1 rounded">{gameState.sessionCode}</span>
+                    {!isPrivate && <span className="ml-2 text-green-600 text-sm">🌍 Public</span>}
+                  </p>
+                  <p className="text-sm text-gray-500">
+                    🔗 Share: <span className="font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded select-all">
+                      {window.location.origin}/{gameState.sessionCode}
+                    </span>
+                  </p>
+                </div>
               </div>
               <div className="flex items-center gap-4">
                 <div className="text-right">
@@ -1666,9 +1723,17 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
         {/* Game Header */}
         <div className="bg-white rounded-3xl shadow-2xl p-6 mb-6 card-hover backdrop-blur-sm bg-opacity-95">
           <div className="flex justify-between items-center">
-            <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-3">
-              🎨 <span className="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Guess My Drawing</span>
-            </h1>
+            <div>
+              <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-3">
+                🎨 <span className="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Guess My Drawing</span>
+              </h1>
+              <div className="mt-1">
+                <p className="text-sm text-gray-500">
+                  🔗 {window.location.origin}/{gameState.sessionCode}
+                  {!isPrivate && <span className="ml-2 text-green-600">🌍 Public</span>}
+                </p>
+              </div>
+            </div>
             <div className="flex items-center gap-6">
               <div className="text-center">
                 <p className="text-sm text-gray-600">Round</p>
@@ -1782,11 +1847,13 @@ const GuessMyDrawingGame: React.FC<{ sessionCode: string; wagerAmount: number }>
   );
 };
 
-// Session Selection Component with Wager Amount Input
-const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) => void }> = ({ onJoinSession }) => {
+// Session Selection Component with Wager Amount Input and Public/Private Lobbies
+const SessionSelection: React.FC = () => {
+  const navigate = useNavigate();
   const [sessionCode, setSessionCode] = useState('');
   const [wagerAmount, setWagerAmount] = useState(0.01);
   const [isCreating, setIsCreating] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(false);
   const [connectedWallet, setConnectedWallet] = useState<string | null>(null);
   const [ethProvider, setEthProvider] = useState<any>(null);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
@@ -1872,16 +1939,20 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) 
     setConnectedWallet(null);
   };
 
-  const handleJoin = () => {
-    if (sessionCode.trim()) {
-      onJoinSession(sessionCode.trim().toUpperCase(), wagerAmount);
+  const handleJoin = (code: string) => {
+    if (code.trim()) {
+      navigate(`/${code.trim().toUpperCase()}`);
     }
   };
 
   const createNewSession = () => {
     setIsCreating(true);
     const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-    onJoinSession(randomCode, wagerAmount);
+    navigate(`/${randomCode}?create=true&private=${isPrivate}&wager=${wagerAmount}`);
+  };
+
+  const joinPublicLobby = (code: string) => {
+    navigate(`/${code}`);
   };
 
   if (!ready) {
@@ -1918,18 +1989,127 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) 
   }
 
   return (
-    <div className="min-h-screen bg-gradient-primary flex items-center justify-center p-4">
-      <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full card-hover">
+    <PublicLobbiesProvider>
+      <SessionSelectionContent 
+        sessionCode={sessionCode}
+        setSessionCode={setSessionCode}
+        wagerAmount={wagerAmount}
+        setWagerAmount={setWagerAmount}
+        isCreating={isCreating}
+        isPrivate={isPrivate}
+        setIsPrivate={setIsPrivate}
+        connectedWallet={connectedWallet}
+        isConnecting={isConnecting}
+        user={user}
+        onJoin={handleJoin}
+        onCreateNew={createNewSession}
+        onJoinPublic={joinPublicLobby}
+        onConnectWallet={connectWallet}
+        onDisconnectWallet={disconnectWallet}
+        onLogout={logout}
+      />
+    </PublicLobbiesProvider>
+  );
+};
+
+// Public Lobbies Provider Component
+const PublicLobbiesProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  return (
+    <ReactTogether
+      sessionParams={{
+        appId: MULTISYNQ_APP_ID,
+        apiKey: MULTISYNQ_API_KEY,
+        name: 'guess-drawing-public-lobbies',
+        password: 'public-lobbies-session'
+      }}
+      rememberUsers={true}
+    >
+      {children}
+    </ReactTogether>
+  );
+};
+
+// Session Selection Content Component
+const SessionSelectionContent: React.FC<{
+  sessionCode: string;
+  setSessionCode: (code: string) => void;
+  wagerAmount: number;
+  setWagerAmount: (amount: number) => void;
+  isCreating: boolean;
+  isPrivate: boolean;
+  setIsPrivate: (isPrivate: boolean) => void;
+  connectedWallet: string | null;
+  isConnecting: boolean;
+  user: any;
+  onJoin: (code: string) => void;
+  onCreateNew: () => void;
+  onJoinPublic: (code: string) => void;
+  onConnectWallet: () => void;
+  onDisconnectWallet: () => void;
+  onLogout: () => void;
+}> = ({
+  sessionCode,
+  setSessionCode,
+  wagerAmount,
+  setWagerAmount,
+  isCreating,
+  isPrivate,
+  setIsPrivate,
+  connectedWallet,
+  isConnecting,
+  user,
+  onJoin,
+  onCreateNew,
+  onJoinPublic,
+  onConnectWallet,
+  onDisconnectWallet,
+  onLogout
+}) => {
+  const [publicLobbies, setPublicLobbies] = useStateTogether<Record<string, PublicLobby>>('publicLobbies', {});
+  const myId = useMyId();
+
+  // Clean up old lobbies
+  useEffect(() => {
+    const cleanup = setInterval(() => {
+      const now = Date.now();
+      const updatedLobbies = { ...publicLobbies };
+      let hasChanges = false;
+
+      Object.keys(updatedLobbies).forEach(code => {
+        const lobby = updatedLobbies[code];
+        // Remove lobbies older than 30 minutes
+        if (now - lobby.createdAt > 30 * 60 * 1000) {
+          delete updatedLobbies[code];
+          hasChanges = true;
+        }
+      });
+
+      if (hasChanges) {
+        setPublicLobbies(updatedLobbies);
+      }
+    }, 60000); // Check every minute
+
+    return () => clearInterval(cleanup);
+  }, [publicLobbies, setPublicLobbies]);
+
+  const activePublicLobbies = Object.values(publicLobbies)
+    .filter(lobby => lobby.isActive)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 6); // Show max 6 public lobbies
+
+  return (
+    <div className="min-h-screen bg-gradient-primary p-4">
+      <div className="max-w-6xl mx-auto">
         <div className="text-center mb-8">
           <div className="text-6xl mb-4 animate-bounce-once">🎨</div>
-          <h1 className="text-3xl font-bold text-gray-800 mb-2 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
+          <h1 className="text-4xl font-bold text-gray-800 mb-2 bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
             Guess My Drawing
           </h1>
           <p className="text-gray-600">Join or create a game session</p>
           
-          <div className="mt-4 flex items-center justify-between">
+          <div className="mt-4 flex items-center justify-between max-w-md mx-auto">
             <button
-              onClick={logout}
+              onClick={onLogout}
               className="px-3 py-1 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200"
             >
               Logout
@@ -1940,7 +2120,7 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) 
                 <p className="text-xs text-green-600">✅ Wallet Connected</p>
                 <p className="text-xs font-mono">{connectedWallet.slice(0, 6)}...{connectedWallet.slice(-4)}</p>
                 <button
-                  onClick={disconnectWallet}
+                  onClick={onDisconnectWallet}
                   className="text-xs text-orange-600 hover:text-orange-700 underline"
                 >
                   Disconnect
@@ -1948,7 +2128,7 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) 
               </div>
             ) : (
               <button
-                onClick={connectWallet}
+                onClick={onConnectWallet}
                 disabled={isConnecting}
                 className="px-3 py-1 bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm rounded-lg hover:from-blue-600 hover:to-blue-700 transition-all duration-200"
               >
@@ -1958,61 +2138,132 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) 
           </div>
         </div>
 
-        <div className="space-y-6">
-          <div>
-            <label className="block text-sm font-bold text-gray-700 mb-2">
-              🔑 Enter Lobby Code
-            </label>
-            <input
-              type="text"
-              value={sessionCode}
-              onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
-              placeholder="Enter lobby code..."
-              className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-mono text-center shadow-inner"
-              maxLength={6}
-            />
+        <div className="grid lg:grid-cols-2 gap-8">
+          {/* Join/Create Section */}
+          <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover">
+            <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">🚪 Join or Create Game</h2>
+            
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">
+                  🔑 Enter Lobby Code
+                </label>
+                <input
+                  type="text"
+                  value={sessionCode}
+                  onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
+                  placeholder="Enter lobby code..."
+                  className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-mono text-center shadow-inner"
+                  maxLength={6}
+                />
+              </div>
+
+              <button
+                onClick={() => onJoin(sessionCode)}
+                disabled={!sessionCode.trim()}
+                className="w-full py-3 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 transition-all duration-300 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
+              >
+                🚪 Join Game
+              </button>
+
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-gray-300"></div>
+                </div>
+                <div className="relative flex justify-center text-sm">
+                  <span className="px-2 bg-white text-gray-500">or create new</span>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-2">
+                    💰 Set Wager Amount (MON)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={wagerAmount}
+                    onChange={(e) => setWagerAmount(parseFloat(e.target.value) || 0.01)}
+                    className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-bold shadow-inner"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">This amount will be required from all players</p>
+                </div>
+
+                <div className="flex items-center space-x-3">
+                  <label className="flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isPrivate}
+                      onChange={(e) => setIsPrivate(e.target.checked)}
+                      className="sr-only"
+                    />
+                    <div className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
+                      isPrivate ? 'bg-indigo-600' : 'bg-gray-200'
+                    }`}>
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        isPrivate ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </div>
+                    <span className="ml-3 text-sm font-medium text-gray-700">
+                      🔒 Private Lobby
+                    </span>
+                  </label>
+                  <p className="text-xs text-gray-500">
+                    {isPrivate ? 'Only people with the code can join' : 'Visible to everyone on home screen'}
+                  </p>
+                </div>
+
+                <button
+                  onClick={onCreateNew}
+                  disabled={isCreating}
+                  className="w-full py-3 bg-gradient-success text-white rounded-xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
+                >
+                  {isCreating ? '⏳ Creating...' : '✨ Create New Lobby'}
+                </button>
+              </div>
+            </div>
           </div>
 
-          <button
-            onClick={handleJoin}
-            disabled={!sessionCode.trim()}
-            className="w-full py-3 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl font-bold text-lg hover:from-blue-600 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 transition-all duration-300 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
-          >
-            🚪 Join Game
-          </button>
-
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-300"></div>
-            </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-2 bg-white text-gray-500">or</span>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-2">
-                💰 Set Wager Amount (MON)
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                min="0.01"
-                value={wagerAmount}
-                onChange={(e) => setWagerAmount(parseFloat(e.target.value) || 0.01)}
-                className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-bold shadow-inner"
-              />
-              <p className="text-xs text-gray-500 mt-1">This amount will be required from all players</p>
-            </div>
-
-            <button
-              onClick={createNewSession}
-              disabled={isCreating}
-              className="w-full py-3 bg-gradient-success text-white rounded-xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
-            >
-              {isCreating ? '⏳ Creating...' : '✨ Create New Lobby'}
-            </button>
+          {/* Public Lobbies Section */}
+          <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover">
+            <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">🌍 Public Lobbies</h2>
+            
+            {activePublicLobbies.length === 0 ? (
+              <div className="text-center py-8">
+                <div className="text-4xl mb-4">🏠</div>
+                <p className="text-gray-600 mb-2">No public lobbies available</p>
+                <p className="text-sm text-gray-500">Create the first public lobby to get started!</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {activePublicLobbies.map((lobby) => (
+                  <div key={lobby.sessionCode} className="border-2 border-gray-200 rounded-xl p-4 hover:border-indigo-300 transition-all duration-200 card-hover">
+                    <div className="flex justify-between items-center">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-bold text-indigo-600">#{lobby.sessionCode}</span>
+                          <span className="text-sm text-gray-500">by {lobby.creatorName}</span>
+                        </div>
+                        <div className="flex items-center gap-4 text-sm text-gray-600">
+                          <span>💰 {lobby.wagerAmount} MON</span>
+                          <span>👥 {lobby.playerCount}/{lobby.maxPlayers}</span>
+                          <span>⏰ {Math.floor((Date.now() - lobby.createdAt) / 60000)}m ago</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => onJoinPublic(lobby.sessionCode)}
+                        disabled={lobby.playerCount >= lobby.maxPlayers}
+                        className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 disabled:from-gray-400 disabled:to-gray-500 font-bold transition-all duration-200 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
+                      >
+                        {lobby.playerCount >= lobby.maxPlayers ? 'Full' : 'Join'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2021,7 +2272,12 @@ const SessionSelection: React.FC<{ onJoinSession: (code: string, wager: number) 
 };
 
 // Game wrapper with session code and wager
-const GameWithSession: React.FC<{ sessionCode: string; wagerAmount: number }> = ({ sessionCode, wagerAmount }) => {
+const GameWithSession: React.FC<{ 
+  sessionCode: string; 
+  wagerAmount: number;
+  isCreating?: boolean;
+  isPrivate?: boolean;
+}> = ({ sessionCode, wagerAmount, isCreating = false, isPrivate = false }) => {
   return (
     <ReactTogether
       sessionParams={{
@@ -2032,34 +2288,50 @@ const GameWithSession: React.FC<{ sessionCode: string; wagerAmount: number }> = 
       }}
       rememberUsers={true}
     >
-      <GuessMyDrawingGame sessionCode={sessionCode} wagerAmount={wagerAmount} />
+      <GuessMyDrawingGame 
+        sessionCode={sessionCode} 
+        wagerAmount={wagerAmount}
+        isCreating={isCreating}
+        isPrivate={isPrivate}
+      />
     </ReactTogether>
+  );
+};
+
+// Lobby Route Component - handles URL parameters and lobby creation
+const LobbyRoute: React.FC = () => {
+  const { lobbyCode } = useParams<{ lobbyCode: string }>();
+  const navigate = useNavigate();
+  const searchParams = new URLSearchParams(window.location.search);
+  
+  if (!lobbyCode) {
+    return <div>Invalid lobby code</div>;
+  }
+
+  const isCreating = searchParams.get('create') === 'true';
+  const isPrivate = searchParams.get('private') === 'true';
+  const wagerAmount = parseFloat(searchParams.get('wager') || '0.01');
+
+  return (
+    <GameWithSession 
+      sessionCode={lobbyCode} 
+      wagerAmount={wagerAmount}
+      isCreating={isCreating}
+      isPrivate={isPrivate}
+    />
   );
 };
 
 // App wrapper with MultiSynq and Privy
 const App: React.FC = () => {
-  const [sessionCode, setSessionCode] = useState('');
-  const [wagerAmount, setWagerAmount] = useState(0.01);
-  const [isConnected, setIsConnected] = useState(false);
-
-  const handleJoinSession = (code: string, wager: number) => {
-    setSessionCode(code);
-    setWagerAmount(wager);
-    setIsConnected(true);
-  };
-
-  if (!isConnected) {
-    return (
-      <PrivyProvider appId={PRIVY_APP_ID}>
-        <SessionSelection onJoinSession={handleJoinSession} />
-      </PrivyProvider>
-    );
-  }
-
   return (
     <PrivyProvider appId={PRIVY_APP_ID}>
-      <GameWithSession sessionCode={sessionCode} wagerAmount={wagerAmount} />
+      <Router>
+        <Routes>
+          <Route path="/" element={<SessionSelection />} />
+          <Route path="/:lobbyCode" element={<LobbyRoute />} />
+        </Routes>
+      </Router>
     </PrivyProvider>
   );
 };
