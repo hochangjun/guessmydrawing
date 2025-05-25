@@ -16,6 +16,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@farcaster/frame-sdk": "^0.0.51",
     "@privy-io/react-auth": "^2.13.3",
     "@privy-io/wagmi": "^1.0.3",
     "ethers": "^6.14.1",

@@ -2,6 +2,19 @@
 
 A real-time multiplayer drawing guessing game with blockchain wagering on Monad Testnet, powered by MultiSynq for seamless real-time synchronization and Privy for secure wallet authentication.
 
+## 📱 Farcaster Mini App Version
+
+**NEW!** We're building a Farcaster mini app version optimized for mobile and social gaming. See [`FARCASTER_MINIAPP_PROMPT.md`](./FARCASTER_MINIAPP_PROMPT.md) for detailed implementation instructions.
+
+### Key Farcaster Features:
+- **🎯 Social Identity Integration** - Use Farcaster profiles, pfps, and usernames
+- **📱 Mobile-First Design** - Touch-optimized drawing canvas and UI
+- **🔗 Viral Sharing** - Auto-compose casts for lobby invites and game results
+- **👥 Social Discovery** - Find lobbies with mutual follows and friends
+- **🏆 Social Achievements** - Leaderboards with Farcaster social context
+
+> **Want to build the Farcaster version?** Check out the comprehensive prompt in `FARCASTER_MINIAPP_PROMPT.md` with all technical details, environment variables, and implementation steps.
+
 ## 🎮 Game Features
 
 - **🎨 Real-time Multiplayer Drawing Canvas** - Players draw and see others' drawings in real-time with enhanced visual effects
@@ -39,7 +52,7 @@ A real-time multiplayer drawing guessing game with blockchain wagering on Monad 
 - MetaMask wallet
 - Monad Testnet MON tokens ([Get from faucet](https://faucet.monad.xyz))
 
-### Setup
+### Setup (Web Version)
 
 ```bash
 # Clone the repository
@@ -59,6 +72,16 @@ EOF
 # Start development server
 npm run dev
 ```
+
+### Setup (Farcaster Mini App Version)
+
+For the Farcaster mini app implementation, follow the detailed instructions in [`FARCASTER_MINIAPP_PROMPT.md`](./FARCASTER_MINIAPP_PROMPT.md). The prompt includes:
+
+- Complete environment variable setup
+- Farcaster SDK integration steps
+- Mobile-optimized component architecture
+- Social features implementation guide
+- Deployment and testing checklist
 
 ### Environment Variables
 

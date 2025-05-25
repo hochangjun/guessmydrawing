@@ -210,6 +210,72 @@ const DrawingCanvas: React.FC<{
     setCurrentPath(prev => [...prev, pos]);
   }, [isDrawing, canDraw, getMousePos]);
 
+  // Path simplification function to reduce points while maintaining visual quality
+  const simplifyPath = useCallback((points: Point[], tolerance: number = 4.0): Point[] => {
+    if (points.length <= 2) return points;
+    
+    // Douglas-Peucker algorithm for path simplification
+    const douglasPeucker = (pts: Point[], epsilon: number): Point[] => {
+      if (pts.length <= 2) return pts;
+      
+      // Find the point with maximum distance from line between first and last
+      let maxDist = 0;
+      let maxIndex = 0;
+      const start = pts[0];
+      const end = pts[pts.length - 1];
+      
+      for (let i = 1; i < pts.length - 1; i++) {
+        const dist = pointToLineDistance(pts[i], start, end);
+        if (dist > maxDist) {
+          maxDist = dist;
+          maxIndex = i;
+        }
+      }
+      
+      // If max distance is greater than epsilon, recursively simplify
+      if (maxDist > epsilon) {
+        const left = douglasPeucker(pts.slice(0, maxIndex + 1), epsilon);
+        const right = douglasPeucker(pts.slice(maxIndex), epsilon);
+        return [...left.slice(0, -1), ...right];
+      } else {
+        return [start, end];
+      }
+    };
+    
+    // Helper function to calculate distance from point to line
+    const pointToLineDistance = (point: Point, lineStart: Point, lineEnd: Point): number => {
+      const A = point.x - lineStart.x;
+      const B = point.y - lineStart.y;
+      const C = lineEnd.x - lineStart.x;
+      const D = lineEnd.y - lineStart.y;
+      
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+      
+      if (lenSq === 0) return Math.sqrt(A * A + B * B);
+      
+      const param = dot / lenSq;
+      let xx, yy;
+      
+      if (param < 0) {
+        xx = lineStart.x;
+        yy = lineStart.y;
+      } else if (param > 1) {
+        xx = lineEnd.x;
+        yy = lineEnd.y;
+      } else {
+        xx = lineStart.x + param * C;
+        yy = lineStart.y + param * D;
+      }
+      
+      const dx = point.x - xx;
+      const dy = point.y - yy;
+      return Math.sqrt(dx * dx + dy * dy);
+    };
+    
+    return douglasPeucker(points, tolerance);
+  }, []);
+
   const stopDrawing = useCallback(() => {
     if (!isDrawing || !currentPlayerKey || currentPath.length < 2) {
       setIsDrawing(false);
@@ -217,10 +283,15 @@ const DrawingCanvas: React.FC<{
       return;
     }
 
+    // Simplify the path to reduce data size while maintaining visual quality
+    const simplifiedPoints = simplifyPath(currentPath);
+    
+    console.log(`📏 Path simplified: ${currentPath.length} → ${simplifiedPoints.length} points (${Math.round((1 - simplifiedPoints.length / currentPath.length) * 100)}% reduction)`);
+
     const newPath: DrawingPath = {
       id: `${currentPlayerKey}-${Date.now()}-${Math.random()}`,
       userId: currentPlayerKey,
-      points: currentPath,
+      points: simplifiedPoints,
       color,
       strokeWidth,
       timestamp: Date.now()
@@ -233,7 +304,7 @@ const DrawingCanvas: React.FC<{
     setPaths([...paths, newPath]);
     setIsDrawing(false);
     setCurrentPath([]);
-  }, [isDrawing, currentPlayerKey, currentPath, color, strokeWidth, paths, setPaths]);
+  }, [isDrawing, currentPlayerKey, currentPath, color, strokeWidth, paths, setPaths, simplifyPath]);
 
   // Check if optimistic path is confirmed
   useEffect(() => {
