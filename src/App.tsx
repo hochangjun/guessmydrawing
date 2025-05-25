@@ -619,15 +619,12 @@ const GuessMyDrawingGame: React.FC<{
         isActive: gameState.phase === 'lobby'
       };
 
-      // Store in localStorage to persist across sessions and pass to global session
-      localStorage.setItem(`publicLobby_${gameState.sessionCode}`, JSON.stringify(publicLobbyData));
+      console.log('📢 Registering public lobby directly to shared state:', publicLobbyData);
       
-      console.log('📢 Storing public lobby in localStorage:', publicLobbyData);
-      
-      // Also try to register via global function if available
+      // Register via global function if available
       if ((window as any).registerPublicLobby) {
         (window as any).registerPublicLobby(publicLobbyData);
-        console.log('📢 Also registered via global function');
+        console.log('📢 Registered via global function');
       }
       
       // Update creator's individual lobby state
@@ -635,65 +632,30 @@ const GuessMyDrawingGame: React.FC<{
         (window as any).setCreatorLobbyState(connectedWallet, publicLobbyData);
         console.log('👤 Updated creator lobby state');
       }
-      
-      // Dispatch a custom event that can be picked up by other windows/tabs
-      window.dispatchEvent(new CustomEvent('publicLobbyCreated', { 
-        detail: publicLobbyData 
-      }));
-      
-      // Force immediate refresh across all windows with a slight delay
-      setTimeout(() => {
-        window.dispatchEvent(new CustomEvent('forceRefreshLobbies'));
-      }, 100);
     }
   }, [isCreating, isPrivate, gameState.lobbyOwner, currentPlayerKey, authenticated, gameState.sessionCode, gameState.wagerAmount, gameState.phase, Object.keys(players).length, connectedWallet, user?.wallet?.address]);
 
   // Update public lobby player count - FIXED
   useEffect(() => {
     if (!isPrivate && gameState.lobbyOwner === currentPlayerKey) {
-      const publicLobbyData = localStorage.getItem(`publicLobby_${gameState.sessionCode}`);
-      if (publicLobbyData) {
-        const lobbyData = JSON.parse(publicLobbyData);
-        lobbyData.playerCount = Object.keys(players).length;
-        lobbyData.isActive = gameState.phase === 'lobby';
-        localStorage.setItem(`publicLobby_${gameState.sessionCode}`, JSON.stringify(lobbyData));
-        
-        console.log('👥 Updated public lobby player count:', Object.keys(players).length);
-        
-        // Also update via global function
-        if ((window as any).updatePublicLobbyPlayerCount) {
-          (window as any).updatePublicLobbyPlayerCount(gameState.sessionCode, Object.keys(players).length);
-        }
-        
-        // Dispatch update event
-        window.dispatchEvent(new CustomEvent('publicLobbyUpdated', { 
-          detail: lobbyData 
-        }));
+      console.log('👥 Updating public lobby player count:', Object.keys(players).length);
+      
+      // Update via global function
+      if ((window as any).updatePublicLobbyPlayerCount) {
+        (window as any).updatePublicLobbyPlayerCount(gameState.sessionCode, Object.keys(players).length);
       }
     }
-  }, [Object.keys(players).length, isPrivate, gameState.lobbyOwner, currentPlayerKey, gameState.sessionCode, gameState.phase]);
+  }, [Object.keys(players).length, isPrivate, gameState.lobbyOwner, currentPlayerKey, gameState.sessionCode]);
 
   // Deactivate public lobby when game starts or ends - FIXED
   useEffect(() => {
     if (!isPrivate && gameState.lobbyOwner === currentPlayerKey && 
         (gameState.phase === 'finished' || gameState.phase === 'playing')) {
-      const publicLobbyData = localStorage.getItem(`publicLobby_${gameState.sessionCode}`);
-      if (publicLobbyData) {
-        const lobbyData = JSON.parse(publicLobbyData);
-        lobbyData.isActive = false;
-        localStorage.setItem(`publicLobby_${gameState.sessionCode}`, JSON.stringify(lobbyData));
-        
-        console.log('🔒 Deactivated public lobby');
-        
-        // Also deactivate via global function
-        if ((window as any).deactivatePublicLobby) {
-          (window as any).deactivatePublicLobby(gameState.sessionCode);
-        }
-        
-        // Dispatch deactivation event
-        window.dispatchEvent(new CustomEvent('publicLobbyDeactivated', { 
-          detail: { sessionCode: gameState.sessionCode } 
-        }));
+      console.log('🔒 Deactivating public lobby');
+      
+      // Deactivate via global function
+      if ((window as any).deactivatePublicLobby) {
+        (window as any).deactivatePublicLobby(gameState.sessionCode);
       }
     }
   }, [gameState.phase, isPrivate, gameState.lobbyOwner, currentPlayerKey, gameState.sessionCode]);
@@ -1436,37 +1398,23 @@ const GuessMyDrawingGame: React.FC<{
           walletAddress: connectedWallet
         });
         
-        // Update localStorage directly
-        const lobbyKey = `publicLobby_${gameState.sessionCode}`;
-        const existingLobby = localStorage.getItem(lobbyKey);
-        if (existingLobby) {
-          try {
-            const lobbyData = JSON.parse(existingLobby);
-            const newPlayerCount = Math.max(0, lobbyData.playerCount - 1);
-            
-            if (newPlayerCount === 0) {
-              // Remove empty lobby
-              localStorage.removeItem(lobbyKey);
-              console.log('🗑️ Removed empty lobby from localStorage:', gameState.sessionCode);
-            } else {
-              // Update player count
-              lobbyData.playerCount = newPlayerCount;
-              localStorage.setItem(lobbyKey, JSON.stringify(lobbyData));
-              console.log('📉 Updated lobby player count to:', newPlayerCount);
+        // Update via global function to update shared state
+        if ((window as any).updatePublicLobbyPlayerCount) {
+          const currentPlayerCount = Object.keys(players).length;
+          const newPlayerCount = Math.max(0, currentPlayerCount - 1);
+          
+          if (newPlayerCount === 0) {
+            // Remove empty lobby via global function
+            if ((window as any).deactivatePublicLobby) {
+              (window as any).deactivatePublicLobby(gameState.sessionCode);
             }
-          } catch (error) {
-            console.error('Error updating lobby data:', error);
+            console.log('🗑️ Deactivated empty lobby:', gameState.sessionCode);
+          } else {
+            // Update player count via global function
+            (window as any).updatePublicLobbyPlayerCount(gameState.sessionCode, newPlayerCount);
+            console.log('📉 Updated lobby player count to:', newPlayerCount);
           }
         }
-        
-        // Dispatch leave event to update public lobby state across windows
-        window.dispatchEvent(new CustomEvent('playerLeftLobby', { 
-          detail: { 
-            sessionCode: gameState.sessionCode,
-            playerId: currentPlayerKey,
-            walletAddress: connectedWallet
-          } 
-        }));
       }
       
       navigate('/');
@@ -1564,7 +1512,7 @@ const GuessMyDrawingGame: React.FC<{
             onClick={login}
             className="w-full py-4 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-2xl font-bold text-lg hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow"
           >
-            🚀 Connect Wallet & Play
+            🚀 Connect Account & Play
           </button>
         </div>
       </div>
@@ -1768,7 +1716,6 @@ const GuessMyDrawingGame: React.FC<{
               gameState={gameState} 
               onLeaveLobby={leaveLobby}
               connectedWallet={connectedWallet}
-              onDisconnectWallet={disconnectWallet}
               onKickPlayer={kickPlayer}
               currentPlayerKey={currentPlayerKey}
             />
@@ -1876,7 +1823,6 @@ const GuessMyDrawingGame: React.FC<{
                 players={Object.values(players)} 
                 gameState={gameState}
                 connectedWallet={connectedWallet}
-                onDisconnectWallet={disconnectWallet}
                 onKickPlayer={kickPlayer}
                 currentPlayerKey={currentPlayerKey}
               />
@@ -2008,7 +1954,6 @@ const GuessMyDrawingGame: React.FC<{
               gameState={gameState} 
               onLeaveLobby={leaveLobby}
               connectedWallet={connectedWallet}
-              onDisconnectWallet={disconnectWallet}
               onKickPlayer={kickPlayer}
               currentPlayerKey={currentPlayerKey}
             />
@@ -2399,7 +2344,6 @@ const SessionSelectionContent: React.FC<{
             delete updated[sessionCode];
             return updated;
           });
-          localStorage.removeItem(`publicLobby_${sessionCode}`);
           console.log(`🗑️ Removed empty lobby: ${sessionCode}`);
         } else {
           // Update player count
@@ -2408,7 +2352,6 @@ const SessionSelectionContent: React.FC<{
             ...prev,
             [sessionCode]: updatedLobby
           }));
-          localStorage.setItem(`publicLobby_${sessionCode}`, JSON.stringify(updatedLobby));
           console.log(`✅ Updated lobby ${sessionCode} to ${newPlayerCount} players`);
         }
       } else {
@@ -2505,9 +2448,6 @@ const SessionSelectionContent: React.FC<{
       [lobbyCode]: updatedLobby
     }));
     
-    // Also update localStorage for persistence
-    localStorage.setItem(`publicLobby_${lobbyCode}`, JSON.stringify(updatedLobby));
-    
     console.log(`${connectedWallet.slice(0, 8)} joined lobby:`, lobbyCode);
     
     // Navigate to the actual game
@@ -2531,14 +2471,6 @@ const SessionSelectionContent: React.FC<{
           return updated;
         });
         
-        // Remove from localStorage
-        localStorage.removeItem(`publicLobby_${lobbyCode}`);
-        
-        // Dispatch removal event
-        window.dispatchEvent(new CustomEvent('publicLobbyRemoved', { 
-          detail: { sessionCode: lobbyCode } 
-        }));
-        
         console.log(`🗑️ Removed empty lobby: ${lobbyCode}`);
       } else {
         // Update the lobby's player count in shared state
@@ -2550,14 +2482,6 @@ const SessionSelectionContent: React.FC<{
         setPublicLobbies(prev => ({
           ...prev,
           [lobbyCode]: updatedLobby
-        }));
-        
-        // Update localStorage
-        localStorage.setItem(`publicLobby_${lobbyCode}`, JSON.stringify(updatedLobby));
-        
-        // Dispatch update event
-        window.dispatchEvent(new CustomEvent('publicLobbyUpdated', { 
-          detail: updatedLobby 
         }));
       }
     }
@@ -2586,37 +2510,8 @@ const SessionSelectionContent: React.FC<{
   // Manual refresh function for public lobbies
   const refreshPublicLobbies = () => {
     console.log('🔄 Manually refreshing public lobbies...');
-    const loadPublicLobbies = () => {
-      const lobbies: Record<string, PublicLobby> = {};
-      
-      // Load from localStorage
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith('publicLobby_')) {
-          try {
-            const lobbyData = JSON.parse(localStorage.getItem(key) || '');
-            const sessionCode = key.replace('publicLobby_', '');
-            
-            // Only include active lobbies that are less than 30 minutes old
-            const isRecent = Date.now() - lobbyData.createdAt < 30 * 60 * 1000;
-            if (lobbyData.isActive && isRecent) {
-              lobbies[sessionCode] = lobbyData;
-            } else if (!isRecent) {
-              // Clean up old lobbies
-              localStorage.removeItem(key);
-            }
-          } catch (error) {
-            console.error('Error parsing lobby data:', error);
-            localStorage.removeItem(key || '');
-          }
-        }
-      }
-      
-      console.log('🔄 Refreshed public lobbies:', lobbies);
-      setPublicLobbies(lobbies);
-    };
-    
-    loadPublicLobbies();
+    // Force a re-render by updating the state
+    setPublicLobbies(prev => ({ ...prev }));
   };
 
   // Make these functions available globally for other components
@@ -2640,6 +2535,7 @@ const SessionSelectionContent: React.FC<{
         if (now - lobby.createdAt > 30 * 60 * 1000) {
           delete updatedLobbies[code];
           hasChanges = true;
+          console.log('🗑️ Cleaned up old lobby:', code);
         }
       });
 
