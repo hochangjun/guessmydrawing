@@ -85,6 +85,12 @@ interface PublicLobby {
   isActive: boolean;
 }
 
+// Interface for individual user's current lobby state
+interface UserLobbyState {
+  currentLobby: PublicLobby | null;
+  isInLobby: boolean;
+}
+
 // Global window type extension
 declare global {
   interface Window {
@@ -442,7 +448,6 @@ const PlayerList: React.FC<{
   gameState: GameState; 
   onLeaveLobby?: () => void;
   connectedWallet?: string | null;
-  onDisconnectWallet?: () => void;
   onKickPlayer?: (playerId: string) => void;
   currentPlayerKey?: string | null;
 }> = ({ 
@@ -450,7 +455,6 @@ const PlayerList: React.FC<{
   gameState, 
   onLeaveLobby,
   connectedWallet,
-  onDisconnectWallet,
   onKickPlayer,
   currentPlayerKey
 }) => {
@@ -463,15 +467,6 @@ const PlayerList: React.FC<{
           👥 Players ({players.length}/9)
         </h3>
         <div className="flex gap-2">
-          {connectedWallet && onDisconnectWallet && (
-            <button
-              onClick={onDisconnectWallet}
-              className="px-3 py-1 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-sm rounded-lg hover:from-orange-600 hover:to-orange-700 transition-all duration-200 shadow-md btn-glow"
-              title="Disconnect Wallet"
-            >
-              Disconnect
-            </button>
-          )}
           {onLeaveLobby && (
             <button
               onClick={onLeaveLobby}
@@ -566,8 +561,8 @@ const GuessMyDrawingGame: React.FC<{
   const [prizeDistributionTx, setPrizeDistributionTx] = useState<string | null>(null);
   const [contractGameInfo, setContractGameInfo] = useState<GameInfo | null>(null);
 
-  // Game state with optimistic updates
-  const [gameState, setGameState] = useStateTogether<GameState>('gameState', {
+  // Game state with optimistic updates - use session-specific keys
+  const [gameState, setGameState] = useStateTogether<GameState>(`gameState_${sessionCode}`, {
     phase: 'lobby',
     currentRound: 0,
     totalRounds: 3,
@@ -583,12 +578,12 @@ const GuessMyDrawingGame: React.FC<{
     createdAt: Date.now()
   });
 
-  const [drawingPaths, setDrawingPaths] = useStateTogether<DrawingPath[]>('drawingPaths', []);
-  const [players, setPlayers] = useStateTogether<Record<string, Player>>('players', {});
-  const [chatMessages, setChatMessages] = useStateTogether<ChatMessage[]>('chatMessages', []);
-  const [usedWords, setUsedWords] = useStateTogether<string[]>('usedWords', []); // Track used words
-  const [originalPrizePool, setOriginalPrizePool] = useStateTogether<number>('originalPrizePool', 0); // Store original prize amount
-  const [roundAdvanceInProgress, setRoundAdvanceInProgress] = useStateTogether<boolean>('roundAdvanceInProgress', false); // Prevent multiple round advances
+  const [drawingPaths, setDrawingPaths] = useStateTogether<DrawingPath[]>(`drawingPaths_${sessionCode}`, []);
+  const [players, setPlayers] = useStateTogether<Record<string, Player>>(`players_${sessionCode}`, {});
+  const [chatMessages, setChatMessages] = useStateTogether<ChatMessage[]>(`chatMessages_${sessionCode}`, []);
+  const [usedWords, setUsedWords] = useStateTogether<string[]>(`usedWords_${sessionCode}`, []); // Track used words
+  const [originalPrizePool, setOriginalPrizePool] = useStateTogether<number>(`originalPrizePool_${sessionCode}`, 0); // Store original prize amount
+  const [roundAdvanceInProgress, setRoundAdvanceInProgress] = useStateTogether<boolean>(`roundAdvanceInProgress_${sessionCode}`, false); // Prevent multiple round advances
 
   // Local state
   const [currentColor, setCurrentColor] = useState('#4f46e5');
@@ -635,10 +630,21 @@ const GuessMyDrawingGame: React.FC<{
         console.log('📢 Also registered via global function');
       }
       
+      // Update creator's individual lobby state
+      if ((window as any).setCreatorLobbyState && connectedWallet) {
+        (window as any).setCreatorLobbyState(connectedWallet, publicLobbyData);
+        console.log('👤 Updated creator lobby state');
+      }
+      
       // Dispatch a custom event that can be picked up by other windows/tabs
       window.dispatchEvent(new CustomEvent('publicLobbyCreated', { 
         detail: publicLobbyData 
       }));
+      
+      // Force immediate refresh across all windows with a slight delay
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('forceRefreshLobbies'));
+      }, 100);
     }
   }, [isCreating, isPrivate, gameState.lobbyOwner, currentPlayerKey, authenticated, gameState.sessionCode, gameState.wagerAmount, gameState.phase, Object.keys(players).length, connectedWallet, user?.wallet?.address]);
 
@@ -1422,6 +1428,47 @@ const GuessMyDrawingGame: React.FC<{
 
   const leaveLobby = () => {
     if (confirm('Are you sure you want to leave the lobby?')) {
+      // Update public lobby player count if this is a public lobby
+      if (!isPrivate && currentPlayerKey && connectedWallet) {
+        console.log('👋 Player leaving lobby:', {
+          sessionCode: gameState.sessionCode,
+          playerId: currentPlayerKey,
+          walletAddress: connectedWallet
+        });
+        
+        // Update localStorage directly
+        const lobbyKey = `publicLobby_${gameState.sessionCode}`;
+        const existingLobby = localStorage.getItem(lobbyKey);
+        if (existingLobby) {
+          try {
+            const lobbyData = JSON.parse(existingLobby);
+            const newPlayerCount = Math.max(0, lobbyData.playerCount - 1);
+            
+            if (newPlayerCount === 0) {
+              // Remove empty lobby
+              localStorage.removeItem(lobbyKey);
+              console.log('🗑️ Removed empty lobby from localStorage:', gameState.sessionCode);
+            } else {
+              // Update player count
+              lobbyData.playerCount = newPlayerCount;
+              localStorage.setItem(lobbyKey, JSON.stringify(lobbyData));
+              console.log('📉 Updated lobby player count to:', newPlayerCount);
+            }
+          } catch (error) {
+            console.error('Error updating lobby data:', error);
+          }
+        }
+        
+        // Dispatch leave event to update public lobby state across windows
+        window.dispatchEvent(new CustomEvent('playerLeftLobby', { 
+          detail: { 
+            sessionCode: gameState.sessionCode,
+            playerId: currentPlayerKey,
+            walletAddress: connectedWallet
+          } 
+        }));
+      }
+      
       navigate('/');
     }
   };
@@ -1992,6 +2039,30 @@ const SessionSelection: React.FC = () => {
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const { authenticated, ready, login, logout, user } = usePrivy();
 
+  // Blockchain functions
+  const switchToMonadTestnet = async () => {
+    const provider = ethProvider || (window as any).ethereum;
+    if (!provider) {
+      throw new Error('No wallet found');
+    }
+
+    try {
+      await provider.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: MONAD_TESTNET.chainId }],
+      });
+    } catch (switchError: any) {
+      if (switchError.code === 4902) {
+        await provider.request({
+          method: 'wallet_addEthereumChain',
+          params: [MONAD_TESTNET],
+        });
+      } else {
+        throw switchError;
+      }
+    }
+  };
+
   // Detect ethereum provider
   useEffect(() => {
     const detectProvider = async () => {
@@ -2045,6 +2116,28 @@ const SessionSelection: React.FC = () => {
     }
   }, [user?.wallet?.address, connectedWallet]);
 
+  // Auto-check and switch network when wallet is connected
+  useEffect(() => {
+    const checkAndSwitchNetwork = async () => {
+      if (connectedWallet && ethProvider) {
+        try {
+          const chainId = await ethProvider.request({ method: 'eth_chainId' });
+          console.log('Current chain ID:', chainId, 'Expected:', MONAD_TESTNET.chainId);
+          
+          if (chainId !== MONAD_TESTNET.chainId) {
+            console.log('🔄 Wrong network detected, switching to Monad Testnet...');
+            await switchToMonadTestnet();
+            console.log('✅ Successfully switched to Monad Testnet');
+          }
+        } catch (error) {
+          console.error('❌ Network check/switch failed:', error);
+        }
+      }
+    };
+
+    checkAndSwitchNetwork();
+  }, [connectedWallet, ethProvider]);
+
   const connectWallet = async () => {
     if (isConnecting) return;
     
@@ -2059,6 +2152,15 @@ const SessionSelection: React.FC = () => {
       const accounts = await provider.request({ method: 'eth_requestAccounts' });
       if (accounts && accounts.length > 0) {
         setConnectedWallet(accounts[0]);
+        
+        // Auto-switch to Monad Testnet after connecting
+        try {
+          await switchToMonadTestnet();
+          console.log('✅ Successfully switched to Monad Testnet');
+        } catch (networkError: any) {
+          console.error('❌ Failed to switch network:', networkError);
+          // Don't block wallet connection if network switch fails
+        }
       }
     } catch (error: any) {
       console.error('Failed to connect wallet:', error);
@@ -2080,7 +2182,8 @@ const SessionSelection: React.FC = () => {
 
   const createNewSession = () => {
     setIsCreating(true);
-    const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    // Generate 3-digit number (100-999)
+    const randomCode = Math.floor(Math.random() * 900 + 100).toString();
     navigate(`/${randomCode}?create=true&private=${isPrivate}&wager=${wagerAmount}`);
   };
 
@@ -2145,21 +2248,9 @@ const SessionSelection: React.FC = () => {
   );
 };
 
-// Public Lobbies Provider Component
+// Public Lobbies Provider Component (no longer needed - using global session)
 const PublicLobbiesProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  return (
-    <ReactTogether
-      sessionParams={{
-        appId: MULTISYNQ_APP_ID,
-        apiKey: MULTISYNQ_API_KEY,
-        name: 'guess-drawing-public-lobbies',
-        password: 'public-lobbies-session'
-      }}
-      rememberUsers={true}
-    >
-      {children}
-    </ReactTogether>
-  );
+  return <>{children}</>;
 };
 
 // Session Selection Content Component
@@ -2199,6 +2290,11 @@ const SessionSelectionContent: React.FC<{
   onLogout
 }) => {
   const [publicLobbies, setPublicLobbies] = useStateTogether<Record<string, PublicLobby>>('publicLobbies', {});
+  // Fix: Use wallet address for truly independent user lobby states
+  const [userLobbyState, setUserLobbyState] = useStateTogether<UserLobbyState>(
+    `current-lobby-${connectedWallet || 'anonymous'}`, 
+    { currentLobby: null, isInLobby: false }
+  );
   const myId = useMyId();
 
   // Load public lobbies from localStorage on mount
@@ -2242,6 +2338,11 @@ const SessionSelectionContent: React.FC<{
         ...prev,
         [event.detail.sessionCode]: event.detail
       }));
+      
+      // Force a refresh to ensure all windows see the new lobby
+      setTimeout(() => {
+        refreshPublicLobbies();
+      }, 500);
     };
 
     const handlePublicLobbyUpdated = (event: CustomEvent) => {
@@ -2263,10 +2364,70 @@ const SessionSelectionContent: React.FC<{
       });
     };
 
+    const handlePublicLobbyRemoved = (event: CustomEvent) => {
+      console.log('🗑️ Public lobby removed event:', event.detail);
+      setPublicLobbies(prev => {
+        const updated = { ...prev };
+        delete updated[event.detail.sessionCode];
+        return updated;
+      });
+    };
+
+    const handlePlayerLeftLobby = (event: CustomEvent) => {
+      const { sessionCode, walletAddress } = event.detail;
+      console.log('👋 Player left lobby event:', event.detail);
+      
+      // If this is the current user leaving, update their state
+      if (walletAddress === connectedWallet) {
+        setUserLobbyState({
+          currentLobby: null,
+          isInLobby: false
+        });
+        console.log(`👤 Current user left lobby: ${sessionCode}`);
+      }
+      
+      // Update the lobby player count for ALL users
+      const lobby = publicLobbies[sessionCode];
+      if (lobby) {
+        const newPlayerCount = Math.max(0, lobby.playerCount - 1);
+        console.log(`📉 Updating lobby ${sessionCode} player count: ${lobby.playerCount} → ${newPlayerCount}`);
+        
+        if (newPlayerCount === 0) {
+          // Remove empty lobby
+          setPublicLobbies(prev => {
+            const updated = { ...prev };
+            delete updated[sessionCode];
+            return updated;
+          });
+          localStorage.removeItem(`publicLobby_${sessionCode}`);
+          console.log(`🗑️ Removed empty lobby: ${sessionCode}`);
+        } else {
+          // Update player count
+          const updatedLobby = { ...lobby, playerCount: newPlayerCount };
+          setPublicLobbies(prev => ({
+            ...prev,
+            [sessionCode]: updatedLobby
+          }));
+          localStorage.setItem(`publicLobby_${sessionCode}`, JSON.stringify(updatedLobby));
+          console.log(`✅ Updated lobby ${sessionCode} to ${newPlayerCount} players`);
+        }
+      } else {
+        console.log(`⚠️ Lobby ${sessionCode} not found in publicLobbies`);
+      }
+    };
+
+    const handleForceRefreshLobbies = () => {
+      console.log('🔄 Force refresh lobbies event received');
+      refreshPublicLobbies();
+    };
+
     // Add event listeners
     window.addEventListener('publicLobbyCreated', handlePublicLobbyCreated as EventListener);
     window.addEventListener('publicLobbyUpdated', handlePublicLobbyUpdated as EventListener);
     window.addEventListener('publicLobbyDeactivated', handlePublicLobbyDeactivated as EventListener);
+    window.addEventListener('publicLobbyRemoved', handlePublicLobbyRemoved as EventListener);
+    window.addEventListener('playerLeftLobby', handlePlayerLeftLobby as EventListener);
+    window.addEventListener('forceRefreshLobbies', handleForceRefreshLobbies as EventListener);
 
     // Refresh lobbies every 10 seconds
     const refreshInterval = setInterval(loadPublicLobbies, 10000);
@@ -2275,6 +2436,9 @@ const SessionSelectionContent: React.FC<{
       window.removeEventListener('publicLobbyCreated', handlePublicLobbyCreated as EventListener);
       window.removeEventListener('publicLobbyUpdated', handlePublicLobbyUpdated as EventListener);
       window.removeEventListener('publicLobbyDeactivated', handlePublicLobbyDeactivated as EventListener);
+      window.removeEventListener('publicLobbyRemoved', handlePublicLobbyRemoved as EventListener);
+      window.removeEventListener('playerLeftLobby', handlePlayerLeftLobby as EventListener);
+      window.removeEventListener('forceRefreshLobbies', handleForceRefreshLobbies as EventListener);
       clearInterval(refreshInterval);
     };
   }, [setPublicLobbies]);
@@ -2314,12 +2478,154 @@ const SessionSelectionContent: React.FC<{
     });
   };
 
+  // User-specific lobby management functions
+  const joinLobbyAsUser = (lobbyCode: string) => {
+    const lobby = publicLobbies[lobbyCode];
+    if (!lobby || !connectedWallet) return;
+    
+    if (lobby.playerCount >= lobby.maxPlayers) {
+      alert('Lobby is full!');
+      return;
+    }
+    
+    // Update user's individual lobby state
+    setUserLobbyState({
+      currentLobby: lobby,
+      isInLobby: true
+    });
+    
+    // Update the lobby's player count in shared state
+    const updatedLobby = {
+      ...lobby,
+      playerCount: lobby.playerCount + 1
+    };
+    
+    setPublicLobbies(prev => ({
+      ...prev,
+      [lobbyCode]: updatedLobby
+    }));
+    
+    // Also update localStorage for persistence
+    localStorage.setItem(`publicLobby_${lobbyCode}`, JSON.stringify(updatedLobby));
+    
+    console.log(`${connectedWallet.slice(0, 8)} joined lobby:`, lobbyCode);
+    
+    // Navigate to the actual game
+    onJoinPublic(lobbyCode);
+  };
+  
+  const leaveLobbyAsUser = () => {
+    if (!userLobbyState.currentLobby || !connectedWallet) return;
+    
+    const lobbyCode = userLobbyState.currentLobby.sessionCode;
+    const lobby = publicLobbies[lobbyCode];
+    
+    if (lobby) {
+      const newPlayerCount = Math.max(0, lobby.playerCount - 1);
+      
+      if (newPlayerCount === 0) {
+        // Remove empty lobby completely
+        setPublicLobbies(prev => {
+          const updated = { ...prev };
+          delete updated[lobbyCode];
+          return updated;
+        });
+        
+        // Remove from localStorage
+        localStorage.removeItem(`publicLobby_${lobbyCode}`);
+        
+        // Dispatch removal event
+        window.dispatchEvent(new CustomEvent('publicLobbyRemoved', { 
+          detail: { sessionCode: lobbyCode } 
+        }));
+        
+        console.log(`🗑️ Removed empty lobby: ${lobbyCode}`);
+      } else {
+        // Update the lobby's player count in shared state
+        const updatedLobby = {
+          ...lobby,
+          playerCount: newPlayerCount
+        };
+        
+        setPublicLobbies(prev => ({
+          ...prev,
+          [lobbyCode]: updatedLobby
+        }));
+        
+        // Update localStorage
+        localStorage.setItem(`publicLobby_${lobbyCode}`, JSON.stringify(updatedLobby));
+        
+        // Dispatch update event
+        window.dispatchEvent(new CustomEvent('publicLobbyUpdated', { 
+          detail: updatedLobby 
+        }));
+      }
+    }
+    
+    // Clear user's individual lobby state
+    setUserLobbyState({
+      currentLobby: null,
+      isInLobby: false
+    });
+    
+    console.log(`${connectedWallet.slice(0, 8)} left lobby:`, lobbyCode);
+  };
+
+  // Function to set creator's lobby state when they create a lobby
+  const setCreatorLobbyState = (walletAddress: string, lobbyData: PublicLobby) => {
+    // Only update if this is the current user's wallet
+    if (walletAddress === connectedWallet) {
+      setUserLobbyState({
+        currentLobby: lobbyData,
+        isInLobby: true
+      });
+      console.log(`👤 Creator ${walletAddress.slice(0, 8)} automatically joined their lobby:`, lobbyData.sessionCode);
+    }
+  };
+
+  // Manual refresh function for public lobbies
+  const refreshPublicLobbies = () => {
+    console.log('🔄 Manually refreshing public lobbies...');
+    const loadPublicLobbies = () => {
+      const lobbies: Record<string, PublicLobby> = {};
+      
+      // Load from localStorage
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('publicLobby_')) {
+          try {
+            const lobbyData = JSON.parse(localStorage.getItem(key) || '');
+            const sessionCode = key.replace('publicLobby_', '');
+            
+            // Only include active lobbies that are less than 30 minutes old
+            const isRecent = Date.now() - lobbyData.createdAt < 30 * 60 * 1000;
+            if (lobbyData.isActive && isRecent) {
+              lobbies[sessionCode] = lobbyData;
+            } else if (!isRecent) {
+              // Clean up old lobbies
+              localStorage.removeItem(key);
+            }
+          } catch (error) {
+            console.error('Error parsing lobby data:', error);
+            localStorage.removeItem(key || '');
+          }
+        }
+      }
+      
+      console.log('🔄 Refreshed public lobbies:', lobbies);
+      setPublicLobbies(lobbies);
+    };
+    
+    loadPublicLobbies();
+  };
+
   // Make these functions available globally for other components
   useEffect(() => {
     (window as any).registerPublicLobby = registerPublicLobby;
     (window as any).updatePublicLobbyPlayerCount = updatePublicLobbyPlayerCount;
     (window as any).deactivatePublicLobby = deactivatePublicLobby;
-  }, []);
+    (window as any).setCreatorLobbyState = setCreatorLobbyState;
+  }, [connectedWallet]);
 
   // Clean up old lobbies
   useEffect(() => {
@@ -2365,14 +2671,7 @@ const SessionSelectionContent: React.FC<{
               <div className="text-center bg-white bg-opacity-20 backdrop-blur-sm rounded-xl px-4 py-3 border border-white border-opacity-30">
                 <p className="text-xs text-green-200">✅ Wallet Connected</p>
                 <p className="text-sm font-mono text-white">{connectedWallet.slice(0, 6)}...{connectedWallet.slice(-4)}</p>
-                <div className="flex gap-2 mt-2">
-                  <button
-                    onClick={onDisconnectWallet}
-                    className="text-xs text-orange-200 hover:text-orange-100 underline"
-                  >
-                    Disconnect
-                  </button>
-                  <span className="text-white text-xs">|</span>
+                <div className="mt-2">
                   <button
                     onClick={onLogout}
                     className="text-xs text-red-200 hover:text-red-100 underline"
@@ -2414,10 +2713,14 @@ const SessionSelectionContent: React.FC<{
                 <input
                   type="text"
                   value={sessionCode}
-                  onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
-                  placeholder="Enter lobby code..."
+                  onChange={(e) => {
+                    // Only allow numbers and limit to 3 digits
+                    const value = e.target.value.replace(/\D/g, '').slice(0, 3);
+                    setSessionCode(value);
+                  }}
+                  placeholder="Enter 3-digit code..."
                   className="w-full px-4 py-3 border-2 border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-lg font-mono text-center shadow-inner"
-                  maxLength={6}
+                  maxLength={3}
                 />
               </div>
 
@@ -2491,7 +2794,16 @@ const SessionSelectionContent: React.FC<{
 
           {/* Public Lobbies Section */}
           <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover">
-            <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">🌍 Public Lobbies</h2>
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-gray-800">🌍 Public Lobbies</h2>
+              <button
+                onClick={refreshPublicLobbies}
+                className="px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm transition-all duration-200 shadow-md"
+                title="Refresh Public Lobbies"
+              >
+                🔄 Refresh
+              </button>
+            </div>
             
             {activePublicLobbies.length === 0 ? (
               <div className="text-center py-8">
@@ -2516,11 +2828,11 @@ const SessionSelectionContent: React.FC<{
                         </div>
                       </div>
                       <button
-                        onClick={() => onJoinPublic(lobby.sessionCode)}
-                        disabled={lobby.playerCount >= lobby.maxPlayers}
+                        onClick={() => joinLobbyAsUser(lobby.sessionCode)}
+                        disabled={lobby.playerCount >= lobby.maxPlayers || !connectedWallet}
                         className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 disabled:from-gray-400 disabled:to-gray-500 font-bold transition-all duration-200 transform hover:scale-105 disabled:transform-none shadow-lg btn-glow"
                       >
-                        {lobby.playerCount >= lobby.maxPlayers ? 'Full' : 'Join'}
+                        {!connectedWallet ? 'Connect Wallet' : lobby.playerCount >= lobby.maxPlayers ? 'Full' : 'Join'}
                       </button>
                     </div>
                   </div>
@@ -2529,12 +2841,49 @@ const SessionSelectionContent: React.FC<{
             )}
           </div>
         </div>
+        
+        {/* Debug Info - User Lobby State */}
+        {connectedWallet && (
+          <div className="mt-8 bg-gray-100 rounded-lg p-4">
+            <h3 className="text-sm font-medium text-gray-700 mb-2">Debug Information - User Lobby State</h3>
+            <div className="text-xs text-gray-600 space-y-1">
+              <p>Connected Wallet: {connectedWallet.slice(0, 8)}...{connectedWallet.slice(-4)}</p>
+              <p>Is In Lobby: {userLobbyState.isInLobby.toString()}</p>
+              <p>Current Lobby: {userLobbyState.currentLobby ? userLobbyState.currentLobby.sessionCode : 'None'}</p>
+              <p>Total Public Lobbies: {Object.keys(publicLobbies).length}</p>
+              <p>Active Public Lobbies: {activePublicLobbies.length}</p>
+              <p>User Lobby State Key: current-lobby-{connectedWallet || 'anonymous'}</p>
+            </div>
+            {userLobbyState.currentLobby && (
+              <div className="mt-2 p-2 bg-blue-50 rounded">
+                <p className="text-xs font-medium text-blue-800">Current Lobby Details:</p>
+                <p className="text-xs text-blue-700">Code: {userLobbyState.currentLobby.sessionCode}</p>
+                <p className="text-xs text-blue-700">Creator: {userLobbyState.currentLobby.creatorName}</p>
+                <p className="text-xs text-blue-700">Players: {userLobbyState.currentLobby.playerCount}/{userLobbyState.currentLobby.maxPlayers}</p>
+                <div className="flex gap-2 mt-1">
+                  <button
+                    onClick={leaveLobbyAsUser}
+                    className="px-2 py-1 bg-red-500 hover:bg-red-600 text-white text-xs rounded"
+                  >
+                    Leave Lobby
+                  </button>
+                  <button
+                    onClick={() => window.location.href = '/'}
+                    className="px-2 py-1 bg-gray-500 hover:bg-gray-600 text-white text-xs rounded"
+                  >
+                    Go Home
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 };
 
-// Game wrapper with session code and wager
+// Game wrapper with session code and wager (no longer needs ReactTogether - using global session)
 const GameWithSession: React.FC<{ 
   sessionCode: string; 
   wagerAmount: number;
@@ -2542,22 +2891,12 @@ const GameWithSession: React.FC<{
   isPrivate?: boolean;
 }> = ({ sessionCode, wagerAmount, isCreating = false, isPrivate = false }) => {
   return (
-    <ReactTogether
-      sessionParams={{
-        appId: MULTISYNQ_APP_ID,
-        apiKey: MULTISYNQ_API_KEY,
-        name: `guess-drawing-${sessionCode}`,
-        password: `session-${sessionCode}-password`
-      }}
-      rememberUsers={true}
-    >
-      <GuessMyDrawingGame 
-        sessionCode={sessionCode} 
-        wagerAmount={wagerAmount}
-        isCreating={isCreating}
-        isPrivate={isPrivate}
-      />
-    </ReactTogether>
+    <GuessMyDrawingGame 
+      sessionCode={sessionCode} 
+      wagerAmount={wagerAmount}
+      isCreating={isCreating}
+      isPrivate={isPrivate}
+    />
   );
 };
 
@@ -2585,16 +2924,53 @@ const LobbyRoute: React.FC = () => {
   );
 };
 
-// App wrapper with MultiSynq and Privy
+// Main App Content Component (inside ReactTogether)
+const MainAppContent: React.FC = () => {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<SessionSelection />} />
+        <Route path="/:lobbyCode" element={<LobbyRoute />} />
+      </Routes>
+    </Router>
+  );
+};
+
+// App Content with ReactTogether (inside PrivyProvider)
+const AppWithReactTogether: React.FC = () => {
+  const { ready } = usePrivy();
+
+  // Single ReactTogether session parameters for the entire app
+  const sessionParams = {
+    appId: MULTISYNQ_APP_ID,
+    apiKey: MULTISYNQ_API_KEY,
+    name: 'guess-my-drawing-global-session-v1',
+    password: 'guessdrawing_global_pw_v1_abc123',
+  };
+
+  if (!ready) {
+    return (
+      <div className="min-h-screen bg-gradient-primary flex items-center justify-center">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 card-hover">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+          <p className="text-center mt-4 text-gray-600">Loading authentication...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ReactTogether sessionParams={sessionParams} rememberUsers={true}>
+      <MainAppContent />
+    </ReactTogether>
+  );
+};
+
+// App wrapper with Privy
 const App: React.FC = () => {
   return (
     <PrivyProvider appId={PRIVY_APP_ID}>
-      <Router>
-        <Routes>
-          <Route path="/" element={<SessionSelection />} />
-          <Route path="/:lobbyCode" element={<LobbyRoute />} />
-        </Routes>
-      </Router>
+      <AppWithReactTogether />
     </PrivyProvider>
   );
 };
