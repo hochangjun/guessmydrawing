@@ -574,7 +574,7 @@ const GuessMyDrawingGame: React.FC<{
     totalRounds: 3,
     currentDrawer: null,
     currentWord: null,
-    timeRemaining: 60,
+    timeRemaining: 35,
     roundStartTime: 0,
     scores: {},
     wagerAmount: wagerAmount, // Set from props and immutable
@@ -764,8 +764,9 @@ const GuessMyDrawingGame: React.FC<{
         !roundAdvanceInProgress &&
         gameState.timeRemaining >= 0) {
       
-      const activePlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
-      const nonDrawerPlayers = activePlayers.filter((p: Player) => p.id !== gameState.currentDrawer);
+      // Fix: Use same logic as startGame and nextRound - players who have paid
+      const paidPlayers = Object.values(players).filter((p: Player) => p.hasPaid);
+      const nonDrawerPlayers = paidPlayers.filter((p: Player) => p.id !== gameState.currentDrawer);
       const safeGuessedCorrectly = gameState.guessedCorrectly || [];
       const allGuessedCorrectly = nonDrawerPlayers.length > 0 && 
         nonDrawerPlayers.every(p => safeGuessedCorrectly.includes(p.id));
@@ -953,6 +954,13 @@ const GuessMyDrawingGame: React.FC<{
     }
 
     if (isPaying) return;
+    
+    // Check if already paid before starting
+    if (currentPlayer?.hasPaid) {
+      alert('You have already paid your wager for this game.');
+      return;
+    }
+    
     setIsPaying(true);
 
     try {
@@ -1153,17 +1161,17 @@ const GuessMyDrawingGame: React.FC<{
       return;
     }
     
-    const readyPlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
-    if (readyPlayers.length < 2) {
-      alert('Need at least 2 players to start!');
+    const paidPlayers = Object.values(players).filter((p: Player) => p.hasPaid);
+    if (paidPlayers.length < 2) {
+      alert('Need at least 2 players who have paid to start!');
       return;
     }
 
-    const firstDrawer = readyPlayers[0];
+    const firstDrawer = paidPlayers[0];
     const word = getRandomWord();
     
-    // Dynamic total rounds = number of players (so everyone draws once)
-    const totalRounds = readyPlayers.length;
+    // Dynamic total rounds = 2x number of players (so everyone draws twice)
+    const totalRounds = paidPlayers.length * 2;
 
     console.log('🎮 Starting game with word:', word, 'drawer:', firstDrawer.id, 'total rounds:', totalRounds);
 
@@ -1171,7 +1179,7 @@ const GuessMyDrawingGame: React.FC<{
     setUsedWords([word]);
     
     // Set original prize pool when starting game
-    const totalPrizePool = gameState.wagerAmount * readyPlayers.length;
+    const totalPrizePool = gameState.wagerAmount * paidPlayers.length;
     setOriginalPrizePool(totalPrizePool);
     console.log('💰 Set original prize pool:', totalPrizePool, 'MON');
 
@@ -1182,7 +1190,7 @@ const GuessMyDrawingGame: React.FC<{
       totalRounds: totalRounds,
       currentDrawer: firstDrawer.id,
       currentWord: word,
-      timeRemaining: 60,
+      timeRemaining: 35,
       roundStartTime: Date.now(),
       guessedCorrectly: []
     };
@@ -1194,7 +1202,7 @@ const GuessMyDrawingGame: React.FC<{
       totalRounds: totalRounds,
       currentDrawer: firstDrawer.id,
       currentWord: word,
-      timeRemaining: 60,
+      timeRemaining: 35,
       roundStartTime: Date.now(),
       guessedCorrectly: []
     }));
@@ -1208,16 +1216,16 @@ const GuessMyDrawingGame: React.FC<{
       return;
     }
 
-    const readyPlayers = Object.values(players).filter((p: Player) => p.hasPaid && p.isReady);
-    const currentDrawerIndex = readyPlayers.findIndex((p: Player) => p.id === gameState.currentDrawer);
-    const nextDrawerIndex = (currentDrawerIndex + 1) % readyPlayers.length;
+    const paidPlayers = Object.values(players).filter((p: Player) => p.hasPaid);
+    const currentDrawerIndex = paidPlayers.findIndex((p: Player) => p.id === gameState.currentDrawer);
+    const nextDrawerIndex = (currentDrawerIndex + 1) % paidPlayers.length;
 
     console.log('🔄 NextRound Debug:', {
       currentRound: gameState.currentRound,
       totalRounds: gameState.totalRounds,
       currentDrawerIndex,
       nextDrawerIndex,
-      readyPlayersCount: readyPlayers.length
+      paidPlayersCount: paidPlayers.length
     });
 
     if (gameState.currentRound >= gameState.totalRounds) {
@@ -1229,7 +1237,7 @@ const GuessMyDrawingGame: React.FC<{
       return;
     }
 
-    const nextDrawer = readyPlayers[nextDrawerIndex];
+    const nextDrawer = paidPlayers[nextDrawerIndex];
     const word = getRandomWord();
 
     console.log('➡️ Next round:', gameState.currentRound + 1, 'word:', word, 'drawer:', nextDrawer.id);
@@ -1239,7 +1247,7 @@ const GuessMyDrawingGame: React.FC<{
       currentRound: gameState.currentRound + 1,
       currentDrawer: nextDrawer.id,
       currentWord: word,
-      timeRemaining: 60,
+      timeRemaining: 35,
       roundStartTime: Date.now(),
       guessedCorrectly: []
     };
@@ -1249,7 +1257,7 @@ const GuessMyDrawingGame: React.FC<{
       currentRound: prev.currentRound + 1,
       currentDrawer: nextDrawer.id,
       currentWord: word,
-      timeRemaining: 60,
+      timeRemaining: 35,
       roundStartTime: Date.now(),
       guessedCorrectly: []
     }));
@@ -1389,7 +1397,7 @@ const GuessMyDrawingGame: React.FC<{
     setChatMessages(prev => [...prev, chatMessage]);
 
     if (isCorrect && !safeGuessedCorrectly.includes(currentPlayerKey)) {
-      const timeBonus = Math.max(0, Math.floor((gameState.timeRemaining / 60) * 20));
+              const timeBonus = Math.max(0, Math.floor((gameState.timeRemaining / 35) * 20));
       const positionBonus = [100, 80, 60, 40][safeGuessedCorrectly.length] || 40;
       const totalPoints = positionBonus + timeBonus;
 
@@ -1628,10 +1636,16 @@ const GuessMyDrawingGame: React.FC<{
                     <div>
                       <p className="text-sm text-purple-600 font-medium">Total Prize Pool</p>
                       <p className="text-2xl font-bold text-purple-800">
-                        {contractGameInfo ? 
-                          ethers.formatEther(contractGameInfo.totalDeposits) : 
-                          (gameState.wagerAmount * Object.keys(players).length).toFixed(3)
-                        } MON
+                        {(() => {
+                          let amount;
+                          if (contractGameInfo) {
+                            amount = parseFloat(ethers.formatEther(contractGameInfo.totalDeposits));
+                          } else {
+                            amount = gameState.wagerAmount * Object.keys(players).length;
+                          }
+                          // Remove trailing zeros
+                          return amount.toString().replace(/\.?0+$/, '');
+                        })()} MON
                       </p>
                     </div>
                   </div>
@@ -1666,10 +1680,10 @@ const GuessMyDrawingGame: React.FC<{
                 ) : !currentPlayer?.hasPaid ? (
                   <button
                     onClick={payWager}
-                    disabled={isPaying}
-                    className="w-full py-4 bg-gradient-success text-white rounded-2xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow disabled:opacity-50"
+                    disabled={isPaying || currentPlayer?.hasPaid}
+                    className="w-full py-4 bg-gradient-success text-white rounded-2xl font-bold text-lg hover:opacity-90 transition-all duration-300 transform hover:scale-105 shadow-lg btn-glow disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {isPaying ? '⏳ Processing...' : `💳 Pay Wager (${gameState.wagerAmount} MON)`}
+                    {currentPlayer?.hasPaid ? '✅ Payment Made' : isPaying ? '⏳ Processing...' : `💳 Pay Wager (${gameState.wagerAmount} MON)`}
                   </button>
                 ) : (
                   <div className="text-center py-4 bg-gradient-to-r from-green-100 to-emerald-100 rounded-2xl border-2 border-green-300 shadow-inner">
@@ -1682,48 +1696,19 @@ const GuessMyDrawingGame: React.FC<{
                   </div>
                 )}
 
-                {/* Debug information */}
-                {process.env.NODE_ENV === 'development' && (
-                  <div className="text-xs text-gray-500 bg-gray-100 p-3 rounded-lg">
-                    <p><strong>Debug Info:</strong></p>
-                    <p>MyId: {myId}</p>
-                    <p>ConnectedWallet: {connectedWallet || 'None'}</p>
-                    <p>Privy Wallet: {user?.wallet?.address || 'None'}</p>
-                    <p>ConsistentUserId: {consistentUserId}</p>
-                    <p>CurrentPlayer WalletAddr: {currentPlayer?.walletAddress || 'None'}</p>
-                  </div>
-                )}
-
-                {/* Debug information for development */}
-                {process.env.NODE_ENV === 'development' && (
-                  <div className="text-xs text-gray-500 bg-gray-100 p-3 rounded-lg mb-4">
-                    <p><strong>Debug Info:</strong></p>
-                    <p>MyId: {myId}</p>
-                    <p>ConnectedWallet: {connectedWallet || 'None'}</p>
-                    <p>Privy Wallet: {user?.wallet?.address || 'None'}</p>
-                    <p>ConsistentUserId: {consistentUserId}</p>
-                    <p>CurrentPlayerKey: {currentPlayerKey || 'None'}</p>
-                    <p>Lobby Owner: {gameState.lobbyOwner || 'None'}</p>
-                    <p>Is Lobby Owner: {(gameState.lobbyOwner === currentPlayerKey).toString()}</p>
-                    <p>Ready Players: {Object.values(players).filter((p: Player) => p.hasPaid).length}</p>
-                    <p>Total Players: {Object.keys(players).length}</p>
-                    <div className="mt-2">
-                      <p><strong>Join Order:</strong></p>
-                      {Object.values(players)
-                        .sort((a, b) => a.joinedAt - b.joinedAt)
-                        .map((p, index) => (
-                          <p key={p.id} className="ml-2">
-                            {index + 1}. {p.id.slice(7, 13)}... at {new Date(p.joinedAt).toLocaleTimeString()}
-                            {p.id === gameState.lobbyOwner && ' 👑'}
-                          </p>
-                        ))}
-                    </div>
-                  </div>
-                )}
-
                 {/* Show start game button with enhanced logic */}
                 {gameState.lobbyOwner === currentPlayerKey && connectedWallet && (
                   <div className="space-y-2">
+                    {!currentPlayer?.hasPaid && (
+                      <div className="bg-yellow-50 border-2 border-yellow-300 rounded-xl p-3 mb-3">
+                        <p className="text-yellow-800 text-sm font-medium text-center">
+                          ⚠️ As lobby owner, you must pay first to activate the smart contract
+                        </p>
+                        <p className="text-yellow-700 text-xs text-center mt-1">
+                          Other players are waiting for you to create the game contract
+                        </p>
+                      </div>
+                    )}
                     <button
                       onClick={startGame}
                       disabled={Object.values(players).filter((p: Player) => p.hasPaid).length < 2}
@@ -1745,6 +1730,39 @@ const GuessMyDrawingGame: React.FC<{
                       Owner: {gameState.lobbyOwner ? `${gameState.lobbyOwner.slice(7, 13)}...` : 'Unknown'}
                     </p>
                   </div>
+                )}
+
+                                {/* Debug information - Collapsible */}
+                                {process.env.NODE_ENV === 'development' && (
+                  <details className="mb-4">
+                    <summary className="cursor-pointer text-sm font-medium text-gray-600 hover:text-gray-800 bg-gray-100 p-2 rounded-lg">
+                      🔧 Debug Info (Click to expand)
+                    </summary>
+                    <div className="text-xs text-gray-500 bg-gray-100 p-3 rounded-lg mt-2">
+                      <p><strong>Debug Info:</strong></p>
+                      <p>MyId: {myId}</p>
+                      <p>ConnectedWallet: {connectedWallet || 'None'}</p>
+                      <p>Privy Wallet: {user?.wallet?.address || 'None'}</p>
+                      <p>ConsistentUserId: {consistentUserId}</p>
+                      <p>CurrentPlayer WalletAddr: {currentPlayer?.walletAddress || 'None'}</p>
+                      <p>CurrentPlayerKey: {currentPlayerKey || 'None'}</p>
+                      <p>Lobby Owner: {gameState.lobbyOwner || 'None'}</p>
+                      <p>Is Lobby Owner: {(gameState.lobbyOwner === currentPlayerKey).toString()}</p>
+                      <p>Ready Players: {Object.values(players).filter((p: Player) => p.hasPaid).length}</p>
+                      <p>Total Players: {Object.keys(players).length}</p>
+                      <div className="mt-2">
+                        <p><strong>Join Order:</strong></p>
+                        {Object.values(players)
+                          .sort((a, b) => a.joinedAt - b.joinedAt)
+                          .map((p, index) => (
+                            <p key={p.id} className="ml-2">
+                              {index + 1}. {p.id.slice(7, 13)}... at {new Date(p.joinedAt).toLocaleTimeString()}
+                              {p.id === gameState.lobbyOwner && ' 👑'}
+                            </p>
+                          ))}
+                      </div>
+                    </div>
+                  </details>
                 )}
 
                 {/* Show message if no wallet connected */}
@@ -1776,11 +1794,18 @@ const GuessMyDrawingGame: React.FC<{
     );
 
     // Use original prize pool if available, otherwise calculate from contract or player count
-    const displayPrizeAmount = originalPrizePool > 0 ? 
-      originalPrizePool.toFixed(3) :
-      contractGameInfo ? 
-        ethers.formatEther(contractGameInfo.totalDeposits) : 
-        (gameState.wagerAmount * Object.keys(players).length).toFixed(3);
+    const displayPrizeAmount = (() => {
+      let amount;
+      if (originalPrizePool > 0) {
+        amount = originalPrizePool;
+      } else if (contractGameInfo) {
+        amount = parseFloat(ethers.formatEther(contractGameInfo.totalDeposits));
+      } else {
+        amount = gameState.wagerAmount * Object.keys(players).length;
+      }
+      // Remove trailing zeros
+      return amount.toString().replace(/\.?0+$/, '');
+    })();
 
     return (
       <div className="min-h-screen bg-gradient-primary p-4">
