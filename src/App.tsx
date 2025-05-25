@@ -358,7 +358,8 @@ const GameChat: React.FC<{
   gamePhase: string;
   myId: string | null;
   guessedCorrectly: string[];
-}> = ({ messages, onSendMessage, isDrawer, gamePhase, myId, guessedCorrectly }) => {
+  players: Record<string, Player>;
+}> = ({ messages, onSendMessage, isDrawer, gamePhase, myId, guessedCorrectly, players }) => {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -403,7 +404,9 @@ const GameChat: React.FC<{
                   : 'bg-gradient-to-r from-slate-100 to-gray-100 text-slate-800'
               }`}
             >
-              <span className="font-bold text-indigo-600">{msg.userId.slice(0, 8)}:</span>{' '}
+              <span className="font-bold text-indigo-600">
+                {players[msg.userId]?.nickname || msg.userId.slice(0, 8)}:
+              </span>{' '}
               <span className={msg.isCorrect && !shouldHideMessage ? 'font-bold' : ''}>
                 {shouldHideMessage ? '✅ guessed correctly!' : msg.message}
               </span>
@@ -1158,8 +1161,11 @@ const GuessMyDrawingGame: React.FC<{
 
     const firstDrawer = readyPlayers[0];
     const word = getRandomWord();
+    
+    // Dynamic total rounds = number of players (so everyone draws once)
+    const totalRounds = readyPlayers.length;
 
-    console.log('🎮 Starting game with word:', word, 'drawer:', firstDrawer.id);
+    console.log('🎮 Starting game with word:', word, 'drawer:', firstDrawer.id, 'total rounds:', totalRounds);
 
     // Reset used words for new game
     setUsedWords([word]);
@@ -1173,6 +1179,7 @@ const GuessMyDrawingGame: React.FC<{
     optimisticGameStateRef.current = {
       phase: 'playing',
       currentRound: 1,
+      totalRounds: totalRounds,
       currentDrawer: firstDrawer.id,
       currentWord: word,
       timeRemaining: 60,
@@ -1184,6 +1191,7 @@ const GuessMyDrawingGame: React.FC<{
       ...prev,
       phase: 'playing',
       currentRound: 1,
+      totalRounds: totalRounds,
       currentDrawer: firstDrawer.id,
       currentWord: word,
       timeRemaining: 60,
@@ -1510,6 +1518,17 @@ const GuessMyDrawingGame: React.FC<{
       fetchContractGameInfo();
     }
   }, [Object.keys(players).length, gameState.sessionCode, ethProvider]);
+
+  // Update original prize pool when players change (for accurate display)
+  useEffect(() => {
+    if (gameState.phase === 'lobby' && Object.keys(players).length > 0) {
+      const currentPrizePool = gameState.wagerAmount * Object.keys(players).length;
+      if (originalPrizePool !== currentPrizePool) {
+        setOriginalPrizePool(currentPrizePool);
+        console.log('💰 Updated prize pool for lobby:', currentPrizePool, 'MON');
+      }
+    }
+  }, [Object.keys(players).length, gameState.wagerAmount, gameState.phase, originalPrizePool, setOriginalPrizePool]);
 
   // Authentication check
   if (!ready) {
@@ -1990,6 +2009,7 @@ const GuessMyDrawingGame: React.FC<{
               gamePhase={gameState.phase}
               myId={currentPlayerKey}
               guessedCorrectly={gameState.guessedCorrectly || []}
+              players={players}
             />
           </div>
         </div>
