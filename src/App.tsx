@@ -2590,11 +2590,11 @@ const SessionSelectionContent: React.FC<{
                       }`} />
                     </div>
                     <span className="ml-3 text-sm font-medium text-gray-700">
-                      🔒 Private Lobby
+                      🔒 Private
                     </span>
                   </label>
                   <p className="text-xs text-gray-500">
-                    {isPrivate ? 'Only people with the code can join' : 'Visible to everyone on home screen'}
+                    {isPrivate ? 'Status: Only people with the code can join' : 'Status: Lobby code visible to everyone on home screen'}
                   </p>
                 </div>
 
