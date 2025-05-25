@@ -211,7 +211,7 @@ const DrawingCanvas: React.FC<{
   }, [isDrawing, canDraw, getMousePos]);
 
   // Path simplification function to reduce points while maintaining visual quality
-  const simplifyPath = useCallback((points: Point[], tolerance: number = 4.0): Point[] => {
+  const simplifyPath = useCallback((points: Point[], tolerance: number = 2.0): Point[] => {
     if (points.length <= 2) return points;
     
     // Douglas-Peucker algorithm for path simplification
