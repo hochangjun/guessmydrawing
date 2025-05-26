@@ -2833,7 +2833,7 @@ const AppWithReactTogether: React.FC = () => {
     appId: MULTISYNQ_APP_ID,
     apiKey: MULTISYNQ_API_KEY,
     name: 'guess-my-drawing-global-session-v1',
-    password: 'guessdrawing_global_pw_v1_abc123',
+    password: import.meta.env.VITE_MULTISYNQ_SESSION_PASSWORD || 'default-session-password',
   };
 
   if (!ready) {

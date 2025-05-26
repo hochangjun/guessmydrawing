@@ -1,6 +1,13 @@
 # 🎨 Guess My Drawing
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![React](https://img.shields.io/badge/React-18+-blue.svg)](https://reactjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5+-blue.svg)](https://www.typescriptlang.org/)
+[![Monad](https://img.shields.io/badge/Blockchain-Monad%20Testnet-purple.svg)](https://monad.xyz/)
+
 A real-time multiplayer drawing guessing game with blockchain wagering on Monad Testnet, powered by MultiSynq for seamless real-time synchronization and Privy for secure wallet authentication.
+
+**🎮 [Play Live Demo](https://your-demo-url.vercel.app)** | **📖 [Contributing Guide](CONTRIBUTING.md)** | **🚀 [Farcaster Mini App](FARCASTER_MINIAPP_PROMPT.md)**
 
 ## 📱 Farcaster Mini App Version
 
@@ -132,15 +139,33 @@ This project is configured for easy deployment on Vercel:
 
 ## 🤝 Contributing
 
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+### Quick Start for Contributors
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+2. Clone: `git clone https://github.com/YOUR_USERNAME/guessmydrawing.git`
+3. Install: `npm install`
+4. Setup: `cp .env.example .env` (add your API keys)
+5. Develop: `npm run dev`
+6. Submit a Pull Request
+
+### Areas for Contribution
+- 🎨 **UI/UX**: Mobile experience, animations, accessibility
+- 🎮 **Game Features**: New tools, word categories, game modes  
+- ⚡ **Performance**: Canvas optimization, network efficiency
+- 🌐 **Social**: Leaderboards, achievements, sharing
+- 🔗 **Blockchain**: Smart contract improvements
 
 ## 📄 License
 
-MIT License - feel free to use this project for learning and development!
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [MultiSynq](https://multisynq.io/) for real-time multiplayer infrastructure
+- [Privy](https://privy.io/) for seamless wallet authentication
+- [Monad](https://monad.xyz/) for fast and efficient blockchain infrastructure
+- All contributors who help make this project better!
 
 ---
 
